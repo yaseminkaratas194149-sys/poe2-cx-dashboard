@@ -1,0 +1,15 @@
+# Public repo: publish ONLY the cx package (+ readme / screenshot).
+# Everything else at the project root (DATA framework, docs, db, tickets,
+# research notes) stays private — ignore all top-level entries, then re-include
+# just what we publish.
+/*
+!/.gitignore
+!/README.md
+!/screenshot.png
+!/cx/
+
+# Regenerable artifacts inside cx/
+__pycache__/
+*.pyc
+*.pyo
+/cx/ui/_icon_cache/
