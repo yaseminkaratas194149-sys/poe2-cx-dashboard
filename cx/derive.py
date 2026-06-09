@@ -27,14 +27,19 @@ MIN_VALUE = 500
 
 
 def resolve_schema(cur) -> str:
-    r"""Pick the cx_* schema with the most recent data (network-free)."""
+    r"""Pick the league cx_* schema with the most recent data (network-free).
+
+    Only schemas that actually carry a `pair_snapshot` table count as league
+    schemas — this skips reference-only schemas like cx_ref (which would
+    otherwise raise 'relation cx_ref.pair_snapshot does not exist')."""
     cur.execute(
-        "select schema_name from information_schema.schemata "
-        "where schema_name like 'cx\\_%' escape '\\' order by 1"
+        "select table_schema from information_schema.tables "
+        "where table_schema like 'cx\\_%' escape '\\' and table_name = 'pair_snapshot' "
+        "order by table_schema"
     )
     schemas = [row[0] for row in cur.fetchall()]
     if not schemas:
-        raise RuntimeError("no cx_* schema found — run `python -m cx` first")
+        raise RuntimeError("no cx_* league schema found — run `python -m cx` first")
     if len(schemas) == 1:
         return schemas[0]
     best, best_e = schemas[0], -1

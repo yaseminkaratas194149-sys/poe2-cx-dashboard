@@ -13,3 +13,4 @@ __pycache__/
 *.pyc
 *.pyo
 /cx/ui/_icon_cache/
+/cx/ref/_dump_cache/

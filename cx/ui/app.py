@@ -19,6 +19,7 @@ from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, GRAY, BORDER,
 from .chrome import (seg_cell, bind_seg_hover, ResizeGrip, CELL_W_GLYPH,
                      pythonw_exe, try_single_instance, release_instance)
 from .cx_panel import CxPanel
+from .uniques_panel import UniquesPanel
 
 # Universal ticket+inspector kit (C:\TP3\tiket_master). cx/__init__ already put
 # C:\TP3 on sys.path, so this resolves like the launcher / DATA imports above.
@@ -79,7 +80,9 @@ class CxApp(tk.Tk):
         self._build_footer()
 
         self.panel = CxPanel(self.body, tm=self.tm)
-        self.panel.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 4))
+        self.uniques = UniquesPanel(self.body, tm=self.tm)
+        self._view = "currency"
+        self._show_view("currency")
 
         self.bind("<Control-q>", lambda e: self._quit())
         self.geometry("1000x640")
@@ -113,6 +116,20 @@ class CxApp(tk.Tk):
         sub = tk.Label(tb, text="PoE2 Currency Exchange", bg=BG, fg=FG_MUTED,
                        font=("Segoe UI", 8))
         sub.pack(side="left", pady=4)
+
+        # view toggle — Currency | Uniques (sticky active state on DULL_GRN)
+        vseg = tk.Frame(tb, bg=BG)
+        vseg.pack(side="left", padx=(12, 0), pady=3)
+        o_cv, self.btn_view_cur = seg_cell(vseg, "Currency", width=76, first=True,
+                                           font=("Segoe UI", 9))
+        o_cv.pack(side="left")
+        self.btn_view_cur.bind("<Button-1>", lambda e: self._show_view("currency"))
+        bind_seg_hover(self.btn_view_cur)
+        o_uq, self.btn_view_uniq = seg_cell(vseg, "Uniques", width=68,
+                                            font=("Segoe UI", 9))
+        o_uq.pack(side="left")
+        self.btn_view_uniq.bind("<Button-1>", lambda e: self._show_view("uniques"))
+        bind_seg_hover(self.btn_view_uniq)
 
         # drag the window by the toolbar (title bar replacement)
         for w in (tb, title, sub):
@@ -171,6 +188,18 @@ class CxApp(tk.Tk):
         footer = tk.Frame(self.body, bg=BG)
         footer.pack(side="bottom", fill="x")
         ResizeGrip(footer, self, size=16, bg=BG).pack(side="right", padx=2, pady=2)
+
+    def _show_view(self, name):
+        """Swap the main area between the currency dashboard and the uniques browser."""
+        self._view = name
+        self.panel.pack_forget()
+        self.uniques.pack_forget()
+        target = self.panel if name == "currency" else self.uniques
+        target.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 4))
+        for b, on in ((self.btn_view_cur, name == "currency"),
+                      (self.btn_view_uniq, name == "uniques")):
+            b._active = on
+            b.config(bg=(DULL_GRN if on else b._base_bg))
 
     # ------------------------------------------------------------------
     # window placement / drag

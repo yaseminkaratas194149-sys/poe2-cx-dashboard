@@ -11,6 +11,7 @@ not a red error. Widgets are tagged through the universal ticket+inspector handl
 import queue
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import ttk
 
@@ -411,6 +412,7 @@ class CxPanel(tk.Frame):
                 self._show_placeholder(self.board_ph, "no liquid pairs this hour")
             self._set_freshness(cur, self._schema)
         except Exception as e:
+            traceback.print_exc()        # also surface in the terminal log
             self.status.config(text=f"err: {e}", fg=RED)
         finally:
             if conn is not None:
@@ -441,6 +443,7 @@ class CxPanel(tk.Frame):
                 self.cur_sub.config(text="")
                 self.cur_icon.config(image="")
         except Exception as e:
+            traceback.print_exc()        # also surface in the terminal log
             self.cur_title.config(text="error", fg=RED)
             self.cur_sub.config(text=str(e)[:60])
             self.cur_icon.config(image="")

@@ -5,6 +5,7 @@ digests; no auth (a User-Agent with contact is sent). League path segment is
 the short name (e.g. 'runes').
 """
 import json
+import urllib.parse
 import urllib.request
 
 from cx.config import POE2SCOUT_BASE, REALM, USER_AGENT, LEAGUE_SHORT
@@ -53,3 +54,15 @@ def snapshot_pairs(short: str) -> list:
 def pair_history(short: str, item_id_1: int, item_id_2: int, limit: int = 2000) -> dict:
     """Per-pair hourly history (keyed by ItemId). Returns {History:[...], Meta, ...}."""
     return get(f"/{REALM}/Leagues/{short}/Currencies/Pairs/{item_id_1}/{item_id_2}/History?Limit={limit}")
+
+
+def items_categories(short: str) -> dict:
+    """Item taxonomy: {UniqueCategories:[{ApiId,Label,Icon}], CurrencyCategories:[...]}."""
+    return get(f"/{REALM}/Leagues/{short}/Items/Categories")
+
+
+def uniques_by_category(short: str, category: str, page: int = 1, per_page: int = 250) -> dict:
+    """One page of uniques in a category -> {CurrentPage, Pages, Total, Items:[...]}.
+    NOTE: poe2scout populates uniques for SOFTCORE leagues only (HC categories are empty)."""
+    q = urllib.parse.urlencode({"Category": category, "Page": page, "PerPage": per_page})
+    return get(f"/{REALM}/Leagues/{short}/Uniques/ByCategory?{q}")

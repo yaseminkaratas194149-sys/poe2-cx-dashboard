@@ -14,6 +14,11 @@ REALM = "poe2"
 # ShortName is 'runeshc' (-> schema cx_runeshc). Both 'runes' and 'runeshc' carry
 # IsCurrent, so without this pin the resolver would pick softcore 'runes'.
 LEAGUE_SHORT = "runeshc"
+# poe2scout tracks UNIQUES only for softcore leagues (HC unique categories are
+# empty). A unique's name/base/mods/icon are league-invariant, so the unique
+# reference is pulled from the softcore counterpart and stored in the active
+# schema. Update alongside LEAGUE_SHORT when the league rotates.
+UNIQUES_LEAGUE_SHORT = "runes"
 POE2SCOUT_BASE = "https://api.poe2scout.com"
 # poe2scout asks callers to identify themselves. Public code carries only the
 # repo URL (identifiable, no personal data); set POE2CX_CONTACT in the environment
@@ -23,6 +28,11 @@ USER_AGENT = os.environ.get("POE2CX_CONTACT") or \
 
 # Canonical DDL template (db/schema.sql, with {schema} placeholder)
 SCHEMA_SQL = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
+
+# League-invariant item reference (names EN/RU, icons, stats) lives ONCE in its
+# own schema, not per league. db/ref_schema.sql is the {schema} template for it.
+REF_SCHEMA = "cx_ref"
+REF_SCHEMA_SQL = Path(__file__).resolve().parent.parent / "db" / "ref_schema.sql"
 
 
 def schema_name(short_name: str) -> str:

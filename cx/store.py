@@ -7,7 +7,7 @@ maps to one row per hour regardless of the feed's emission order.
 """
 from decimal import Decimal
 
-from psycopg2.extras import execute_values
+from psycopg2.extras import Json, execute_values
 
 
 def _num(x):
@@ -82,6 +82,44 @@ def upsert_pairs(cur, schema: str, pairs: list, epoch: int) -> int:
         f"stock1 = EXCLUDED.stock1, high_stock1 = EXCLUDED.high_stock1, "
         f"rate2 = EXCLUDED.rate2, volume2 = EXCLUDED.volume2, value2 = EXCLUDED.value2, "
         f"stock2 = EXCLUDED.stock2, high_stock2 = EXCLUDED.high_stock2",
+        rows,
+    )
+    return len(rows)
+
+
+def upsert_uniques(cur, schema: str, items: list) -> int:
+    """UPSERT cx_<league>.unique_item from poe2scout Uniques/ByCategory rows.
+
+    Mod arrays are stored as text[]; empty -> NULL (avoids empty-array typing).
+    requirements / full ItemMetadata kept as jsonb (forward capacity)."""
+    rows = []
+    for it in items:
+        m = it.get("ItemMetadata") or {}
+        rows.append((
+            it["UniqueItemId"], _int(it.get("ItemId")), it.get("Name"),
+            m.get("base_type") or it.get("Type"), it.get("CategoryApiId"),
+            it.get("IconUrl"), _int(m.get("item_level")),
+            m.get("implicit_mods") or None, m.get("explicit_mods") or None,
+            m.get("flavor_text"),
+            Json(m["requirements"]) if m.get("requirements") is not None else None,
+            _num(it.get("CurrentPrice")),
+            Json(m) if m else None,
+        ))
+    if not rows:
+        return 0
+    execute_values(
+        cur,
+        f"INSERT INTO {schema}.unique_item "
+        f"(unique_item_id, item_id, name, base_type, category_api_id, icon_url, "
+        f" item_level, implicit_mods, explicit_mods, flavour_text, requirements, "
+        f" current_price, metadata) VALUES %s "
+        f"ON CONFLICT (unique_item_id) DO UPDATE SET "
+        f"item_id = EXCLUDED.item_id, name = EXCLUDED.name, base_type = EXCLUDED.base_type, "
+        f"category_api_id = EXCLUDED.category_api_id, icon_url = EXCLUDED.icon_url, "
+        f"item_level = EXCLUDED.item_level, implicit_mods = EXCLUDED.implicit_mods, "
+        f"explicit_mods = EXCLUDED.explicit_mods, flavour_text = EXCLUDED.flavour_text, "
+        f"requirements = EXCLUDED.requirements, current_price = EXCLUDED.current_price, "
+        f"metadata = EXCLUDED.metadata",
         rows,
     )
     return len(rows)
