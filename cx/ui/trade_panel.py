@@ -152,38 +152,69 @@ class TradePanel(tk.Frame):
         self.cb_status = self._combo(f, trade.STATUS_OPTIONS, "available", 10)
         self.cb_status.grid(row=0, column=4, columnspan=2, sticky="w")
 
-        # row 1 — category + rarity
-        self._lbl(f, "Category").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        # row 1 — archetype: pick a case (helmet / boots / ring …) and the
+        # builder fills the 4-6 stat bundles that matter for that slot. This is
+        # the "circulate between cases" mechanism — one click instead of hand-
+        # picking ~600 stats. (Bundles + slots live in trade.ARCHETYPES.)
+        self._lbl(f, "Archetype").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self._arch_keys = list(trade.ARCHETYPES)
+        arch_labels = [trade.ARCHETYPES[k]["label"] for k in self._arch_keys]
+        self._arch_by_label = dict(zip(arch_labels, self._arch_keys))
+        ar = tk.Frame(f, bg=BG2)
+        ar.grid(row=1, column=1, columnspan=5, sticky="we", padx=(8, 0), pady=(8, 0))
+        self.cb_arch = self._combo(ar, ["—"] + arch_labels, "—", 16)
+        self.cb_arch.pack(side="left")
+        o_load_arch, self.btn_arch = seg_cell(ar, "Load case", width=78,
+                                              first=True, font=_FONT)
+        o_load_arch.pack(side="left", padx=(6, 0))
+        self.btn_arch.bind("<Button-1>", lambda e: self._load_archetype())
+        bind_seg_hover(self.btn_arch)
+        tk.Label(ar, text="HP/ES · Resist · Attrs (+ slot-specific)",
+                 bg=BG2, fg=FG_MUTED, font=_FONT).pack(side="left", padx=(10, 0))
+
+        # row 2 — import: paste a cx trade link, read back its stat shortlist.
+        self._lbl(f, "From link").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        il = tk.Frame(f, bg=BG2)
+        il.grid(row=2, column=1, columnspan=5, sticky="we", padx=(8, 0), pady=(6, 0))
+        self.e_link = self._entry(il, 44)
+        self.e_link.pack(side="left", fill="x", expand=True)
+        o_imp, self.btn_import = seg_cell(il, "Read", width=52, first=True, font=_FONT)
+        o_imp.pack(side="left", padx=(6, 0))
+        self.btn_import.bind("<Button-1>", lambda e: self._import_link())
+        bind_seg_hover(self.btn_import)
+
+        # row 3 — category + rarity
+        self._lbl(f, "Category").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self._cat_by_label = {lab: cid for cid, lab in trade.CATEGORIES}
         self._label_by_cat = {cid: lab for cid, lab in trade.CATEGORIES}
         self.cb_cat = self._combo(f, [lab for _, lab in trade.CATEGORIES], "Any", 26)
-        self.cb_cat.grid(row=1, column=1, columnspan=2, sticky="w",
+        self.cb_cat.grid(row=3, column=1, columnspan=2, sticky="w",
                          padx=(8, 0), pady=(8, 0))
-        self._lbl(f, "Rarity").grid(row=1, column=3, sticky="e", padx=(8, 4), pady=(8, 0))
+        self._lbl(f, "Rarity").grid(row=3, column=3, sticky="e", padx=(8, 4), pady=(8, 0))
         self.cb_rar = self._combo(f, ["Any"] + [r for r in trade.RARITIES if r], "Any", 10)
-        self.cb_rar.grid(row=1, column=4, columnspan=2, sticky="w", pady=(8, 0))
+        self.cb_rar.grid(row=3, column=4, columnspan=2, sticky="w", pady=(8, 0))
 
-        # row 2 — req level min/max + price cap
-        self._lbl(f, "Req level").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        # row 4 — req level min/max + price cap
+        self._lbl(f, "Req level").grid(row=4, column=0, sticky="w", pady=(6, 0))
         lv = tk.Frame(f, bg=BG2)
-        lv.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        lv.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         self.e_lvl_min = self._entry(lv, 5)
         self.e_lvl_min.pack(side="left")
         tk.Label(lv, text="–", bg=BG2, fg=FG_MUTED).pack(side="left", padx=3)
         self.e_lvl_max = self._entry(lv, 5)
         self.e_lvl_max.pack(side="left")
-        self._lbl(f, "Price ≤").grid(row=2, column=3, sticky="e", padx=(8, 4), pady=(6, 0))
+        self._lbl(f, "Price ≤").grid(row=4, column=3, sticky="e", padx=(8, 4), pady=(6, 0))
         pr = tk.Frame(f, bg=BG2)
-        pr.grid(row=2, column=4, columnspan=2, sticky="w", pady=(6, 0))
+        pr.grid(row=4, column=4, columnspan=2, sticky="w", pady=(6, 0))
         self.e_price = self._entry(pr, 6)
         self.e_price.pack(side="left")
         self.cb_price = self._combo(pr, trade.PRICE_OPTIONS, "exalted", 9, readonly=False)
         self.cb_price.pack(side="left", padx=(4, 0))
 
-        # row 3 — stat search; row 4 — suggestion list (hidden until matches)
-        self._lbl(f, "Add stat").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        # row 5 — stat search; row 6 — suggestion list (hidden until matches)
+        self._lbl(f, "Add stat").grid(row=5, column=0, sticky="w", pady=(10, 0))
         self.e_search = self._entry(f, 52)
-        self.e_search.grid(row=3, column=1, columnspan=5, sticky="we",
+        self.e_search.grid(row=5, column=1, columnspan=5, sticky="we",
                            padx=(8, 0), pady=(10, 0))
         self.e_search.bind("<KeyRelease>", self._filter_sugg)
         self.e_search.bind("<Return>", lambda e: self._pick_sugg())
@@ -197,13 +228,13 @@ class TradePanel(tk.Frame):
         self.sugg.bind("<Return>", lambda e: self._pick_sugg())
         self._sugg_items = []
 
-        # row 5 — chosen stat filters (one row each: text · min · max · ✕)
+        # row 7 — chosen stat filters (one row each: text · min · max · ✕)
         self.stats_frame = tk.Frame(f, bg=BG2)
-        self.stats_frame.grid(row=5, column=0, columnspan=6, sticky="we", pady=(6, 0))
+        self.stats_frame.grid(row=7, column=0, columnspan=6, sticky="we", pady=(6, 0))
 
-        # row 6 — actions: open + save-as
+        # row 8 — actions: open + save-as
         act = tk.Frame(f, bg=BG2)
-        act.grid(row=6, column=0, columnspan=6, sticky="we", pady=(12, 0))
+        act.grid(row=8, column=0, columnspan=6, sticky="we", pady=(12, 0))
         o_open, self.btn_open = seg_cell(act, "↗ Open trade2", width=110,
                                          primary=True, first=True, font=_FONT)
         o_open.pack(side="left")
@@ -217,9 +248,9 @@ class TradePanel(tk.Frame):
         self.btn_save.bind("<Button-1>", lambda e: self._save_preset())
         bind_seg_hover(self.btn_save)
 
-        # row 7 — status line
+        # row 9 — status line
         self.status = tk.Label(f, text="", bg=BG2, fg=FG_DIM, font=_MONO, anchor="w")
-        self.status.grid(row=7, column=0, columnspan=6, sticky="we", pady=(10, 0))
+        self.status.grid(row=9, column=0, columnspan=6, sticky="we", pady=(10, 0))
         f.columnconfigure(2, weight=1)
 
         # presets card — list + load / open / delete
@@ -248,6 +279,10 @@ class TradePanel(tk.Frame):
             return
         tm.tag(self.lbl_league, "trade.league")
         tm.tag(self.cb_status, "trade.form.status")
+        tm.tag(self.cb_arch, "trade.form.archetype")
+        tm.tag(self.btn_arch, "trade.form.archetype.load")
+        tm.tag(self.e_link, "trade.form.fromlink")
+        tm.tag(self.btn_import, "trade.form.fromlink.read")
         tm.tag(self.cb_cat, "trade.form.category")
         tm.tag(self.cb_rar, "trade.form.rarity")
         tm.tag(self.e_search, "trade.form.statsearch")
@@ -271,7 +306,7 @@ class TradePanel(tk.Frame):
             self.sugg.insert("end", t)
         if self._sugg_items:
             self.sugg.config(height=min(8, len(self._sugg_items)))
-            self.sugg.grid(row=4, column=1, columnspan=5, sticky="we", padx=(8, 0))
+            self.sugg.grid(row=6, column=1, columnspan=5, sticky="we", padx=(8, 0))
         else:
             self._hide_sugg()
 
@@ -370,6 +405,43 @@ class TradePanel(tk.Frame):
         for s in p.get("stats") or []:
             self._add_stat_row(s["id"], self._text_by_id.get(s["id"], s["id"]),
                                s.get("min"), s.get("max"))
+
+    # ----------------------------------------------------- archetype / import
+    def _load_archetype(self):
+        """Selected case -> fill the builder with its category + stat shortlist.
+
+        Non-destructive on the rest of the form: this swaps category + the stat
+        rows (the bundles that matter for the slot) but keeps status / price /
+        req-level so the user can flick between cases without re-typing those.
+        Each stat lands "present, any roll" — tighten min/max afterwards."""
+        label = self.cb_arch.get()
+        key = self._arch_by_label.get(label)
+        if not key:
+            self._set_status("pick an archetype first", err=True)
+            return
+        arch = trade.ARCHETYPES[key]
+        self.cb_cat.set(self._label_by_cat.get(arch["category"], "Any"))
+        self._clear_stat_rows()
+        for sid in trade.archetype_stats(key):
+            self._add_stat_row(sid, self._text_by_id.get(sid, sid))
+        n = len(self._stat_rows)
+        self._set_status(f"case loaded: {arch['label']} — {n} stat bundle(s)")
+
+    def _import_link(self):
+        """Read a pasted cx trade link back into the builder: shows exactly which
+        characteristics that link cares about (reverse of Open trade2)."""
+        url = self.e_link.get().strip()
+        if not url:
+            self._set_status("paste a cx trade link first", err=True)
+            return
+        try:
+            p = trade.parse_trade_url(url)
+        except ValueError as e:
+            self._set_status(f"can't read link: {e}", err=True)
+            return
+        self._load_into_form(p)
+        n = len(p.get("stats") or [])
+        self._set_status(f"read link → {n} stat(s) loaded into the builder")
 
     # ---------------------------------------------------------------- actions
     def _set_status(self, text, err=False):
