@@ -1,8 +1,11 @@
 """UniquesPanel — a unique-item browser in the cx visual language.
 
-Drill-down like the poe2scout item browser: a row of global-category chips → a
-row of base chips for the chosen category → the uniques in that base, sorted by
-required level (low → high), each with its icon, level and a mod.
+Drill-down like the poe2scout item browser, now three tiers: a row of fixed
+META-category chips (Weapon · Offhands · Armour · Others) → the chosen meta's
+groups opened in one line → a row of base chips for the chosen group → the
+uniques in that base, sorted by required level (low → high), each with its icon,
+level and a mod. The meta split is a static system-level table (_META_GROUPS),
+permanent and never derived from data; see meta_of().
 
 Second row varies by group: Weapons split by hand (1H/2H); **armour groups (Body
 Armours, Helmets, Gloves, Boots, Offhands) filter by ATTRIBUTE instead of base
@@ -165,6 +168,28 @@ _GROUP_ORDER = ["Weapons", "Offhands", "Body Armours", "Helmets", "Gloves",
                 "Waystones", "Relics"]
 _MAX_SUBCHIPS = 30          # cap base chips; the rest stay reachable under "All"
 
+# Top tier: fixed system-level META-categories over the groups (ticket 1). The
+# group bar is two rows -- row 1 is these four meta-chips, row 2 opens the chosen
+# meta's member groups in a single line. The split is permanent (a static table,
+# not derived from data) so it never duplicates into the per-group sub-taxonomy.
+# Any group not named here folds into "Others" via _meta_of, so nothing is hidden.
+_META_ORDER = ["Weapon", "Offhands", "Armour", "Others"]
+_META_GROUPS = {
+    "Weapon":   ["Weapons"],
+    "Offhands": ["Offhands"],
+    "Armour":   ["Body Armours", "Helmets", "Gloves", "Boots"],
+    "Others":   ["Jewellery", "Charms", "Flasks", "Jewels", "Tablets",
+                 "Waystones", "Relics"],
+}
+# group -> meta (inverted once); the catch-all keeps unknown groups reachable.
+_GROUP_META = {g: m for m, gs in _META_GROUPS.items() for g in gs}
+_META_FALLBACK = "Others"
+
+
+def meta_of(group):
+    """The fixed meta-category a group belongs to; unknown groups -> 'Others'."""
+    return _GROUP_META.get(group, _META_FALLBACK)
+
 # Armour groups filter by ATTRIBUTE (Str/Dex/Int), not by base name: their second
 # chip row is the multi-select Str/Dex/Int toggle instead of base chips. Other
 # groups keep base chips (Weapons keep the 1H/2H split).
@@ -274,6 +299,7 @@ class UniquesPanel(tk.Frame):
         self._schema = config.schema_name(config.LEAGUE_SHORT)
         self._data = {}              # group -> {subgroup -> [item dict]}
         self._icon_urls = {}         # icon key -> url
+        self._sel_meta = None        # chosen top-tier meta-category (Weapon/Armour/…)
         self._sel_group = None
         self._sel_sub = None
         self._sel_attrs = set()      # armour groups: chosen {Str,Dex,Int} (AND filter)
@@ -294,15 +320,19 @@ class UniquesPanel(tk.Frame):
     # ------------------------------------------------------------------
     # inspector tagging — point at this browser's parts, not just describe them.
     # The chip rows are repeated widgets: each chip is tagged with the stem
-    # `uniques.group[<name>]` / `uniques.base[<name>]` (in _chip) or, for armour
-    # groups, `uniques.attr[<Str|Dex|Int|All>]` (in _attr_chip), so a non-Ctrl pick
-    # greps back to the chip-builder and Ctrl pins one chip. No-op without a
-    # TiketMaster handle, so the panel still runs standalone.
+    # `uniques.meta[<name>]` (top tier, in _render_groups), `uniques.group[<name>]`
+    # / `uniques.base[<name>]` (in _chip) or, for armour groups,
+    # `uniques.attr[<Str|Dex|Int|All>]` (in _attr_chip), so a non-Ctrl pick greps
+    # back to the chip-builder and Ctrl pins one chip. No-op without a TiketMaster
+    # handle, so the panel still runs standalone. groupbar = the whole two-row top
+    # block; meta_bar / group_row are its meta row and its expanded-group row.
     def _tag_widgets(self):
         tm = self.tm
         if tm is None:
             return
         tm.tag(self.group_bar, "uniques.groupbar")
+        tm.tag(self.meta_bar, "uniques.metabar")
+        tm.tag(self.group_row, "uniques.grouprow")
         tm.tag(self.sub_bar, "uniques.basebar")
         tm.tag(self.sub_label, "uniques.basebar.label")
         tm.tag(self.list_title, "uniques.title")
@@ -311,8 +341,14 @@ class UniquesPanel(tk.Frame):
 
     # ------------------------------------------------------------------ build
     def _build(self):
+        # Top tier is two rows (ticket 1): meta_bar (fixed Weapon/Offhands/Armour/
+        # Others) over group_row (the chosen meta's groups, all in one line).
         self.group_bar = tk.Frame(self, bg=BG)
         self.group_bar.pack(fill="x", pady=(0, 4))
+        self.meta_bar = tk.Frame(self.group_bar, bg=BG)
+        self.meta_bar.pack(fill="x")
+        self.group_row = tk.Frame(self.group_bar, bg=BG)
+        self.group_row.pack(fill="x", pady=(3, 0))
 
         sub_wrap = tk.Frame(self, bg=BG2)
         sub_wrap.pack(fill="x", pady=(0, 6))
@@ -432,8 +468,22 @@ class UniquesPanel(tk.Frame):
         rest = sorted(g for g in self._data if g not in _GROUP_ORDER)
         return known + rest
 
+    def _meta_members(self, meta):
+        """The present groups of *meta*, in _GROUP_ORDER. 'Others' also collects any
+        group not named in _META_GROUPS, so unknown groups stay reachable."""
+        ordered = self._ordered_groups()
+        return [g for g in ordered if meta_of(g) == meta]
+
+    def _meta_count(self, meta):
+        return sum(sum(len(v) for v in self._data[g].values())
+                   for g in self._meta_members(meta))
+
     def _render_groups(self):
-        for w in self.group_bar.winfo_children():
+        # Top row: the fixed meta-categories (ticket 1). The second row (group_row)
+        # stays empty until a meta is picked, then opens that meta's groups in a line.
+        for w in self.meta_bar.winfo_children():
+            w.destroy()
+        for w in self.group_row.winfo_children():
             w.destroy()
         groups = self._ordered_groups()
         if not groups:
@@ -443,13 +493,14 @@ class UniquesPanel(tk.Frame):
             self._fill_items([])
             self._show_ph(f"no uniques in {self._schema}\nrun  python -m cx.uniques")
             return
-        for i, g in enumerate(groups):
-            n = sum(len(v) for v in self._data[g].values())
-            chip = self._chip(self.group_bar, f"{g}  {n}", False,
-                              lambda gg=g: self._select_group(gg),
-                              eid=f"uniques.group[{g}]")
-            chip.grid(row=i // 11, column=i % 11, padx=2, pady=2, sticky="w")
-        # hidden by default: categories only — nothing picked, list empty (on request)
+        metas = [m for m in _META_ORDER if self._meta_members(m)]
+        for i, m in enumerate(metas):
+            chip = self._chip(self.meta_bar, f"{m}  {self._meta_count(m)}", False,
+                              lambda mm=m: self._select_meta(mm),
+                              eid=f"uniques.meta[{m}]")
+            chip.grid(row=0, column=i, padx=2, pady=2, sticky="w")
+        # hidden by default: meta row only — nothing picked, list empty (on request)
+        self._sel_meta = None
         self._sel_group = None
         self._sel_sub = None
         self._sel_attrs = set()
@@ -460,12 +511,38 @@ class UniquesPanel(tk.Frame):
         self._fill_items([])
         self._show_ph("выбери категорию ↑")
 
+    def _select_meta(self, meta):
+        """Top-row pick: highlight the meta-chip and open its member groups in the
+        second row (all in one line). Clears any group / base selection below."""
+        self._sel_meta = meta
+        self._sel_group = None
+        self._sel_sub = None
+        self._sel_attrs = set()
+        self._attr_all = False
+        for w in self.meta_bar.winfo_children():
+            on = w.cget("text").rsplit("  ", 1)[0] == meta
+            w._active = on
+            w.config(bg=DULL_GRN if on else BG3, fg=FG if on else FG_DIM)
+        for w in self.group_row.winfo_children():
+            w.destroy()
+        for w in self.sub_bar.winfo_children():
+            w.destroy()
+        for i, g in enumerate(self._meta_members(meta)):
+            n = sum(len(v) for v in self._data[g].values())
+            chip = self._chip(self.group_row, f"{g}  {n}", False,
+                              lambda gg=g: self._select_group(gg),
+                              eid=f"uniques.group[{g}]")
+            chip.grid(row=0, column=i, padx=2, pady=2, sticky="w")
+        self.sub_label.config(text="")
+        self._fill_items([])
+        self._show_ph("← выбери категорию")
+
     def _select_group(self, group):
         self._sel_group = group
         self._sel_sub = None
         self._sel_attrs = set()
         self._attr_all = False
-        for w in self.group_bar.winfo_children():
+        for w in self.group_row.winfo_children():     # only the expanded group chips
             on = w.cget("text").rsplit("  ", 1)[0] == group
             w._active = on
             w.config(bg=DULL_GRN if on else BG3, fg=FG if on else FG_DIM)
