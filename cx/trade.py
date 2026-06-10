@@ -79,6 +79,169 @@ def build_search_query(preset: dict) -> dict:
     return {"query": q, "sort": preset.get("sort", {"price": "asc"})}
 
 
+# ---- archetypes: the 4-6 stat bundles that actually matter, per slot --------
+# The whole point of the trade builder: trade2 exposes ~600 stat ids, but for a
+# given gear slot you almost always want the same handful of "bundles" — life or
+# ES, the resistances, the attributes — plus a slot-specific stat (move speed on
+# boots, +levels on a focus, etc.). An archetype is that curated shortlist for
+# one case; the user circulates between archetypes instead of hand-picking stats.
+#
+# Each archetype is {category, label, bundles:[bundle-key ...]}. A bundle is a
+# named group of pseudo stat ids (STAT_BUNDLES); flattening an archetype yields
+# the stat list a preset wants, deduped in declared order.
+STAT_BUNDLES = {
+    "life":       ["pseudo.pseudo_total_life"],
+    "es":         ["pseudo.pseudo_total_energy_shield",
+                   "pseudo.pseudo_increased_energy_shield"],
+    "mana":       ["pseudo.pseudo_total_mana"],
+    # "defence" = pick whichever of life / ES the build runs on — both offered.
+    "defence":    ["pseudo.pseudo_total_life",
+                   "pseudo.pseudo_total_energy_shield"],
+    "resistance": ["pseudo.pseudo_total_elemental_resistance",
+                   "pseudo.pseudo_total_chaos_resistance"],
+    "res_each":   ["pseudo.pseudo_total_fire_resistance",
+                   "pseudo.pseudo_total_cold_resistance",
+                   "pseudo.pseudo_total_lightning_resistance"],
+    "attributes": ["pseudo.pseudo_total_strength",
+                   "pseudo.pseudo_total_dexterity",
+                   "pseudo.pseudo_total_intelligence"],
+    "all_attr":   ["pseudo.pseudo_total_all_attributes"],
+    "move_speed": ["pseudo.pseudo_increased_movement_speed"],
+}
+
+# slot -> the bundles that matter for that slot. Ordered so the most build-
+# defining bundle leads. (label is what the archetype combo shows.)
+ARCHETYPES = {
+    "helmet":  {"category": "armour.helmet", "label": "Helmet",
+                "bundles": ["defence", "resistance", "attributes"]},
+    "chest":   {"category": "armour.chest", "label": "Body Armour",
+                "bundles": ["defence", "resistance", "attributes"]},
+    "gloves":  {"category": "armour.gloves", "label": "Gloves",
+                "bundles": ["defence", "resistance", "attributes"]},
+    # boots: the classic slot-specific case — move speed is always wanted.
+    "boots":   {"category": "armour.boots", "label": "Boots",
+                "bundles": ["move_speed", "defence", "resistance", "attributes"]},
+    "shield":  {"category": "armour.shield", "label": "Shield",
+                "bundles": ["defence", "resistance", "attributes"]},
+    "amulet":  {"category": "accessory.amulet", "label": "Amulet",
+                "bundles": ["defence", "resistance", "attributes"]},
+    "ring":    {"category": "accessory.ring", "label": "Ring",
+                "bundles": ["resistance", "attributes", "life"]},
+    "belt":    {"category": "accessory.belt", "label": "Belt",
+                "bundles": ["life", "resistance"]},
+    "quiver":  {"category": "armour.quiver", "label": "Quiver",
+                "bundles": ["attributes", "resistance"]},
+}
+
+
+def bundle_stats(bundle_key: str) -> list:
+    """Stat ids for one bundle key (unknown key -> [])."""
+    return list(STAT_BUNDLES.get(bundle_key, []))
+
+
+def archetype_stats(name: str) -> list:
+    """Flatten an archetype's bundles to a deduped [stat_id ...] in declared order."""
+    arch = ARCHETYPES.get(name)
+    if not arch:
+        return []
+    seen, out = set(), []
+    for bkey in arch.get("bundles", []):
+        for sid in bundle_stats(bkey):
+            if sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+    return out
+
+
+def archetype_preset(name: str, **overrides) -> dict:
+    """Build a ready preset dict for an archetype: its category + the flattened
+    stat shortlist (each stat "present, any roll" — the user tightens min/max in
+    the builder). Extra pre-fields (status/price/req_level/rarity) via overrides."""
+    arch = ARCHETYPES.get(name)
+    if not arch:
+        return dict(overrides)
+    p = {"category": arch["category"],
+         "stats": [{"id": sid} for sid in archetype_stats(name)]}
+    p.update(overrides)
+    return p
+
+
+# ---- read a trade2 link back into a preset (reverse of preset_to_url) -------
+def _query_to_preset(q: dict) -> dict:
+    """Trade2 search *query* block -> preset pre-fields (best-effort, lossless
+    for the fields the builder edits)."""
+    p = {}
+    status = (q.get("status") or {}).get("option")
+    if status:
+        p["status"] = status
+    stats = []
+    for grp in q.get("stats") or []:
+        for f in grp.get("filters") or []:
+            sid = f.get("id")
+            if not sid:
+                continue
+            s = {"id": sid}
+            val = f.get("value") or {}
+            if val.get("min") is not None:
+                s["min"] = val["min"]
+            if val.get("max") is not None:
+                s["max"] = val["max"]
+            stats.append(s)
+    if stats:
+        p["stats"] = stats
+    filters = q.get("filters") or {}
+    tf = (filters.get("type_filters") or {}).get("filters") or {}
+    if (tf.get("category") or {}).get("option"):
+        p["category"] = tf["category"]["option"]
+    if (tf.get("rarity") or {}).get("option"):
+        p["rarity"] = tf["rarity"]["option"]
+    lvl = ((filters.get("req_filters") or {}).get("filters") or {}).get("lvl") or {}
+    rl = {k: lvl[k] for k in ("min", "max") if lvl.get(k) is not None}
+    if rl:
+        p["req_level"] = rl
+    price = ((filters.get("trade_filters") or {}).get("filters") or {}).get("price")
+    if price:
+        p["price"] = price
+    return p
+
+
+def parse_trade_url(url: str) -> dict:
+    """Reverse a trade2 link into preset pre-fields, so the builder can show
+    "what characteristics this link cares about".
+
+    Handles the cx hand-off form ``…/search/poe2/<league>#cxq=<base64url(body)>``
+    — the self-contained format cx itself produces. (A bare stored-search URL
+    ``…/search/poe2/<league>/<id>`` carries no filters in the URL — only the
+    server holds them — so it can't be decoded offline; we raise for it.)
+
+    Returns the preset dict; raises ValueError if no decodable query is present.
+    """
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("empty URL")
+    frag = ""
+    if "#" in url:
+        frag = url.split("#", 1)[1]
+    m = None
+    if frag:
+        import re
+        m = re.search(r"(?:^|[#&])cxq=([^&]+)", "#" + frag)
+    if not m:
+        raise ValueError(
+            "no #cxq= payload in this link — only cx hand-off links carry their "
+            "filters in the URL; a plain stored-search link can't be decoded")
+    raw = m.group(1)
+    pad = "=" * (-len(raw) % 4)
+    try:
+        body = json.loads(base64.urlsafe_b64decode(raw + pad).decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"bad #cxq payload: {e}")
+    q = body.get("query") if isinstance(body, dict) else None
+    if not isinstance(q, dict):
+        raise ValueError("payload has no query block")
+    return _query_to_preset(q)
+
+
 def preset_to_url(preset: dict, league: str) -> str:
     """Build the trade2 hand-off URL: base + ``#cxq=<base64url(query JSON)>``.
 
