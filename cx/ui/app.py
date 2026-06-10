@@ -19,6 +19,7 @@ from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, GRAY, BORDER,
 from .chrome import (seg_cell, bind_seg_hover, ResizeGrip, CELL_W_GLYPH,
                      pythonw_exe, try_single_instance, release_instance)
 from .cx_panel import CxPanel
+from .trade_panel import TradePanel
 from .uniques_panel import UniquesPanel
 
 # Universal ticket+inspector kit (C:\TP3\tiket_master). cx/__init__ already put
@@ -81,6 +82,9 @@ class CxApp(tk.Tk):
 
         self.panel = CxPanel(self.body, tm=self.tm)
         self.uniques = UniquesPanel(self.body, tm=self.tm)
+        self.trade = TradePanel(self.body, tm=self.tm)
+        self._views = {"currency": self.panel, "uniques": self.uniques,
+                       "trade": self.trade}
         self._view = "currency"
         self._show_view("currency")
 
@@ -130,6 +134,11 @@ class CxApp(tk.Tk):
         o_uq.pack(side="left")
         self.btn_view_uniq.bind("<Button-1>", lambda e: self._show_view("uniques"))
         bind_seg_hover(self.btn_view_uniq)
+        o_tr, self.btn_view_trade = seg_cell(vseg, "Trade", width=56,
+                                             font=("Segoe UI", 9))
+        o_tr.pack(side="left")
+        self.btn_view_trade.bind("<Button-1>", lambda e: self._show_view("trade"))
+        bind_seg_hover(self.btn_view_trade)
 
         # drag the window by the toolbar (title bar replacement)
         for w in (tb, title, sub):
@@ -190,14 +199,16 @@ class CxApp(tk.Tk):
         ResizeGrip(footer, self, size=16, bg=BG).pack(side="right", padx=2, pady=2)
 
     def _show_view(self, name):
-        """Swap the main area between the currency dashboard and the uniques browser."""
+        """Swap the main area between currency / uniques / trade."""
         self._view = name
-        self.panel.pack_forget()
-        self.uniques.pack_forget()
-        target = self.panel if name == "currency" else self.uniques
-        target.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 4))
-        for b, on in ((self.btn_view_cur, name == "currency"),
-                      (self.btn_view_uniq, name == "uniques")):
+        for p in self._views.values():
+            p.pack_forget()
+        self._views[name].pack(side="top", fill="both", expand=True,
+                               padx=8, pady=(6, 4))
+        for b, key in ((self.btn_view_cur, "currency"),
+                       (self.btn_view_uniq, "uniques"),
+                       (self.btn_view_trade, "trade")):
+            on = key == name
             b._active = on
             b.config(bg=(DULL_GRN if on else b._base_bg))
 
