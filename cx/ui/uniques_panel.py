@@ -27,6 +27,7 @@ coarse categories, so the screenshot-style split (Body Armours / Helmets / Bow /
 Staff …) is reconstructed from base-type keywords. Tune the tables freely.
 """
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -291,6 +292,114 @@ def build_sections(name, base, req, implicits, explicits, flavour, props):
     return [(style, _clean(text)) for style, text in out]
 
 
+# ---- tree "info" column: elemental resistances (armour) / DPS (weapons) ------
+# The uniques tree drops the base/mod columns for two derived summaries: armour
+# shows its elemental resistances as 3 cells "fire cold lightning" (e.g. "16 0 10"
+# = +16% Fire, 0 Cold, +10% Lightning; blank when the item grants none); weapons
+# show phys DPS and elemental DPS. Both are read off the stored mods / properties.
+
+# A stored numeric is a roll RANGE ("(50-75)", "8-12") or a plain number; we take
+# the HIGH roll (what a max-rolled copy gives) as the representative value.
+_NUM = r"[+-]?\d+(?:\.\d+)?"
+_RANGE_RE = re.compile(r"\(?\s*(%s)\s*-\s*(%s)\s*\)?" % (_NUM, _NUM))
+
+
+def _hi_roll(text):
+    """High end of the first roll range in *text* ("(50-75)"->75.0, "12"->12.0),
+    or None. Handles the '(-5--1)' double-minus form via the signed number regex."""
+    if text is None:
+        return None
+    m = _RANGE_RE.search(str(text))
+    if m:
+        try:
+            return max(float(m.group(1)), float(m.group(2)))
+        except ValueError:
+            return None
+    m = re.search(_NUM, str(text))
+    return float(m.group(0)) if m else None
+
+
+# Per-element resistance mod templates: "...to Fire Resistance" etc. "all
+# Elemental Resistances" feeds all three. MAXIMUM-resistance and penetration lines
+# are deliberately excluded — this column is the flat elemental resist a piece adds.
+_RESIST_RE = {
+    "fire": re.compile(r"to Fire Resistance\b", re.I),
+    "cold": re.compile(r"to Cold Resistance\b", re.I),
+    "lightning": re.compile(r"to Lightning Resistance\b", re.I),
+}
+_ALL_ELE_RE = re.compile(r"to all Elemental Resistances\b", re.I)
+_MAX_RES_RE = re.compile(r"Maximum", re.I)
+
+
+def elemental_resists(explicits):
+    """The flat Fire/Cold/Lightning resistance an armour piece grants, as a dict
+    {fire,cold,lightning} of high-roll ints, or {} if it grants none. 'to all
+    Elemental Resistances' counts for all three; Maximum-resistance lines skip."""
+    out = {}
+    for m in (explicits or []):
+        if _MAX_RES_RE.search(m):
+            continue
+        val = _hi_roll(m)
+        if val is None:
+            continue
+        if _ALL_ELE_RE.search(m):
+            for e in ("fire", "cold", "lightning"):
+                out[e] = out.get(e, 0) + val
+        else:
+            for e, rx in _RESIST_RE.items():
+                if rx.search(m):
+                    out[e] = out.get(e, 0) + val
+    return {e: int(round(v)) for e, v in out.items()}
+
+
+def resist_cells(explicits):
+    """Armour resist column text: "fire cold lightning" (high rolls) when the piece
+    grants any elemental resistance, else "" — so 0-of-3 reads as an empty cell and
+    e.g. fire-only as "16 0 0". (Ticket's "16 0 10" = +16 fire, 0 cold, +10 ltng.)"""
+    res = elemental_resists(explicits)
+    if not res:
+        return ""
+    return " ".join(str(res.get(e, 0)) for e in ("fire", "cold", "lightning"))
+
+
+# Weapon DPS = average hit * attacks/sec. The damage props are ranges ("6-9"); the
+# average is (lo+hi)/2, so DPS for a band = mid(range)*APS. Phys is its own band;
+# "elemental" sums Fire/Cold/Lightning AND the pre-summed "Elemental Damage" key
+# (poe2scout stores one OR the other, never both, so this can't double-count).
+_ELE_DMG_KEYS = ("Fire Damage", "Cold Damage", "Lightning Damage", "Elemental Damage")
+
+
+def _band_mid(text):
+    """Average of a damage band: "6-9"->7.5, "1 or 102"->51.5, "5"->5.0, else None.
+    Damage bands are non-negative "lo-hi" / "lo or hi"; we match UNSIGNED integers so
+    the '-' stays a range separator (a signed regex would read "6-9" as 6 and -9)."""
+    if text is None:
+        return None
+    nums = re.findall(r"\d+(?:\.\d+)?", str(text))
+    try:
+        vals = [float(n) for n in nums]
+    except ValueError:
+        return None
+    if not vals:
+        return None
+    return (min(vals) + max(vals)) / 2.0
+
+
+def weapon_dps(props):
+    """(phys_dps, ele_dps) rounded ints, or (None, None) where a band/APS is absent
+    so the cell stays blank rather than showing a bogus 0. ele sums every elemental
+    damage band; APS-less rows (Sceptres/Wands with no attack) yield (None, None)."""
+    props = props or {}
+    aps = _hi_roll(props.get("Attacks per Second"))
+    if not aps:
+        return None, None
+    phys = _band_mid(props.get("Physical Damage"))
+    ele = sum(v for v in (_band_mid(props.get(k)) for k in _ELE_DMG_KEYS) if v)
+    phys_dps = int(round(phys * aps)) if phys else None
+    ele_dps = int(round(ele * aps)) if ele else None
+    return phys_dps, ele_dps
+
+
 class UniquesPanel(tk.Frame):
     def __init__(self, parent, tm=None):
         super().__init__(parent, bg=BG)
@@ -372,16 +481,20 @@ class UniquesPanel(tk.Frame):
 
         bodyf = tk.Frame(inner, bg=BG2)
         bodyf.pack(fill="both", expand=True, padx=6, pady=(4, 6))
-        self.tv = ttk.Treeview(bodyf, columns=["lvl", "base", "mod"],
+        # Two derived "info" columns (base/mod dropped): their meaning depends on the
+        # selected group and is set by _set_info_headers() — armour shows elemental
+        # resistances (fire cold lightning) in c1; weapons show phys/ele DPS in c1/c2;
+        # everything else falls back to the first mod in c1. Headers default to mod.
+        self.tv = ttk.Treeview(bodyf, columns=["lvl", "c1", "c2"],
                                show="tree headings")
         self.tv.heading("#0", text="unique")
         self.tv.column("#0", width=210, minwidth=120, anchor="w", stretch=True)
         self.tv.heading("lvl", text="lvl")
         self.tv.column("lvl", width=42, anchor="e", stretch=False)
-        self.tv.heading("base", text="base")
-        self.tv.column("base", width=148, anchor="w", stretch=False)
-        self.tv.heading("mod", text="mod")
-        self.tv.column("mod", width=330, anchor="w", stretch=True)
+        self.tv.heading("c1", text="mod")
+        self.tv.column("c1", width=330, anchor="w", stretch=True)
+        self.tv.heading("c2", text="")
+        self.tv.column("c2", width=72, anchor="e", stretch=False)
         sb = ttk.Scrollbar(bodyf, orient="vertical", command=self.tv.yview,
                            style="Subtle.Vertical.TScrollbar")
         self.tv.configure(yscrollcommand=sb.set)
@@ -542,6 +655,7 @@ class UniquesPanel(tk.Frame):
         self._sel_sub = None
         self._sel_attrs = set()
         self._attr_all = False
+        self._set_info_headers(group)            # retitle c1/c2 for this group's kind
         for w in self.group_row.winfo_children():     # only the expanded group chips
             on = w.cget("text").rsplit("  ", 1)[0] == group
             w._active = on
@@ -701,6 +815,42 @@ class UniquesPanel(tk.Frame):
         self._fill_items(sel)
 
     # ------------------------------------------------------------------ items
+    # The two info columns are filled by item kind: armour -> elemental resists in c1
+    # ("fire cold lightning"), weapons -> phys DPS in c1 / ele DPS in c2, everything
+    # else -> first mod in c1. _set_info_headers retitles them for the chosen group;
+    # _info_cells turns one item into its (c1, c2). A weapon DPS of None reads blank.
+    def _set_info_headers(self, group):
+        """Retitle the two info columns for *group*: armour -> resist triad header in
+        c1; weapons -> 'phys'/'ele' DPS; otherwise the plain 'mod' fallback."""
+        if group in _ATTR_GROUPS:                 # armour: elemental resistances
+            self.tv.heading("c1", text="res  (f c l)")
+            self.tv.column("c1", width=110, anchor="w", stretch=False)
+            self.tv.heading("c2", text="")
+            self.tv.column("c2", width=0, stretch=False)
+        elif group == "Weapons":
+            self.tv.heading("c1", text="phys dps")
+            self.tv.column("c1", width=84, anchor="e", stretch=False)
+            self.tv.heading("c2", text="ele dps")
+            self.tv.column("c2", width=84, anchor="e", stretch=False)
+        else:
+            self.tv.heading("c1", text="mod")
+            self.tv.column("c1", width=330, anchor="w", stretch=True)
+            self.tv.heading("c2", text="")
+            self.tv.column("c2", width=0, stretch=False)
+
+    def _info_cells(self, it):
+        """(c1, c2) for *it* by kind: armour -> ('16 0 10', ''); weapon -> ('123',
+        '88') phys/ele DPS; other -> (first-mod, ''). Driven off the selected group
+        so an item shows the same two values whichever sub-filter surfaced it."""
+        group = self._sel_group
+        if group in _ATTR_GROUPS:
+            return resist_cells(it.get("explicits")), ""
+        if group == "Weapons":
+            phys, ele = weapon_dps(it.get("props"))
+            return ("" if phys is None else str(phys),
+                    "" if ele is None else str(ele))
+        return it.get("mod", ""), ""
+
     def _fill_items(self, items):
         self._hover_restore(self.tv)
         self._close_card()
@@ -709,8 +859,9 @@ class UniquesPanel(tk.Frame):
         ids = []
         for i, it in enumerate(items):
             lvl = "—" if it["lvl"] is None else str(it["lvl"])
+            c1, c2 = self._info_cells(it)
             rid = self.tv.insert("", "end", text=it["name"],
-                                 values=(lvl, it["base"], it["mod"]),
+                                 values=(lvl, c1, c2),
                                  tags=("even" if i % 2 == 0 else "odd",))
             ids.append((rid, it["key"]))
             self._row_item[rid] = it
@@ -732,8 +883,9 @@ class UniquesPanel(tk.Frame):
                                  open=True, tags=("section",))
             for i, it in enumerate(items):
                 lvl = "—" if it["lvl"] is None else str(it["lvl"])
+                c1, c2 = self._info_cells(it)
                 rid = self.tv.insert(pid, "end", text=it["name"],
-                                     values=(lvl, it["base"], it["mod"]),
+                                     values=(lvl, c1, c2),
                                      tags=("even" if i % 2 == 0 else "odd",))
                 ids.append((rid, it["key"]))
                 self._row_item[rid] = it          # section header rows excluded
