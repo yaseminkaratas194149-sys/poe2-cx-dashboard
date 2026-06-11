@@ -12,6 +12,7 @@ League: the display name in the trade URL comes from the ``cx_<league>.league``
 row (local, no network), with poe2scout as the backup resolver.
 """
 import queue
+import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -23,6 +24,7 @@ from cx import config, trade
 from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, BORDER_DARK,
                     DULL_GRN, RED)
 from .chrome import seg_cell, bind_seg_hover
+from .equipment_nav import EquipmentNav
 
 _FONT = ("Segoe UI", 9)
 _MONO = ("Consolas", 9)
@@ -50,7 +52,10 @@ class TradePanel(tk.Frame):
         self._stat_opts = [(i, f"[pseudo] {t}") for i, t in trade.PSEUDO_STATS]
         self._text_by_id = dict(self._stat_opts)
         self._stat_rows = []          # [(stat_id, min Entry, max Entry, row Frame)]
+        self._mystat_ids = []         # stat id per row in the ★-stats list
         self._presets = {}
+        self._used = {}               # stat id -> [preset names]  (derived)
+        self._editing = None          # name of the preset last Loaded (edit hint)
         self._q = queue.Queue()
         self._build()
         self._tag_widgets()
@@ -96,13 +101,14 @@ class TradePanel(tk.Frame):
                     self._stat_opts = val
                     self._text_by_id = dict(val)
                     self._set_status(f"stat dictionary: {len(val)} entries")
+                    self._reload_mystats()   # relabel ★-stats with full dict text
         except queue.Empty:
             pass
         self.after(400, self._poll)
 
     # ------------------------------------------------------------------ build
-    def _card(self, title):
-        outer = tk.Frame(self, bg=BORDER_DARK)
+    def _card(self, title, parent=None):
+        outer = tk.Frame(parent or self, bg=BORDER_DARK)
         head = tk.Label(outer, text=title.upper(), bg=BG2, fg=FG_MUTED,
                         font=("Segoe UI", 8, "bold"), anchor="w", padx=8, pady=3)
         body = tk.Frame(outer, bg=BG2)
@@ -138,9 +144,13 @@ class TradePanel(tk.Frame):
             self.option_add(f"*TCombobox*Listbox.{opt}", val)
 
         left_outer, lf = self._card("search builder")
-        right_outer, rf = self._card("presets")
+        right_col = tk.Frame(self, bg=BG)
         left_outer.pack(side="left", fill="both", expand=True)
-        right_outer.pack(side="left", fill="y", padx=(8, 0))
+        right_col.pack(side="left", fill="y", padx=(8, 0))
+        presets_outer, rf = self._card("presets", right_col)
+        presets_outer.pack(fill="both", expand=True)
+        mystats_outer, msf = self._card("★ stats you use", right_col)
+        mystats_outer.pack(fill="both", expand=True, pady=(8, 0))
 
         f = tk.Frame(lf, bg=BG2)
         f.pack(fill="both", expand=True, padx=10, pady=8)
@@ -149,50 +159,53 @@ class TradePanel(tk.Frame):
         self.lbl_league = tk.Label(f, text="league: …", bg=BG2, fg=FG_DIM, font=_FONT)
         self.lbl_league.grid(row=0, column=0, columnspan=3, sticky="w")
         self._lbl(f, "Status").grid(row=0, column=3, sticky="e", padx=(8, 4))
-        self.cb_status = self._combo(f, trade.STATUS_OPTIONS, "available", 10)
+        self.cb_status = self._combo(
+            f, trade.STATUS_LABEL_LIST,
+            trade.STATUS_LABELS[trade.STATUS_DEFAULT], 26)
         self.cb_status.grid(row=0, column=4, columnspan=2, sticky="w")
 
-        # row 1 — archetype: pick a case (helmet / boots / ring …) and the
-        # builder fills the 4-6 stat bundles that matter for that slot. This is
-        # the "circulate between cases" mechanism — one click instead of hand-
-        # picking ~600 stats. (Bundles + slots live in trade.ARCHETYPES.)
-        self._lbl(f, "Archetype").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self._arch_keys = list(trade.ARCHETYPES)
-        arch_labels = [trade.ARCHETYPES[k]["label"] for k in self._arch_keys]
-        self._arch_by_label = dict(zip(arch_labels, self._arch_keys))
-        ar = tk.Frame(f, bg=BG2)
-        ar.grid(row=1, column=1, columnspan=5, sticky="we", padx=(8, 0), pady=(8, 0))
-        self.cb_arch = self._combo(ar, ["—"] + arch_labels, "—", 16)
-        self.cb_arch.pack(side="left")
-        o_load_arch, self.btn_arch = seg_cell(ar, "Load case", width=78,
+        # row 1 — category: the SAME chip navigator the Uniques tab uses (meta →
+        # group → base), built from trade.CATEGORIES instead of the unique DB. This
+        # replaces the old Category + Archetype dropdowns — one click down the tree
+        # instead of hunting a ~50-entry list. Rarity stays its own field below, so
+        # "unique" is just a rarity here, never a separate branch of the tree.
+        self._lbl(f, "Category").grid(row=1, column=0, sticky="nw", pady=(8, 0))
+        self._sel_category = ""
+        self._arch_by_category = {trade.ARCHETYPES[k]["category"]: k
+                                  for k in trade.ARCHETYPES}
+        self.nav = EquipmentNav(f, tm=self.tm, eid_prefix="trade.form.category",
+                                bg=BG2, on_leaf=self._on_cat_leaf)
+        self.nav.grid(row=1, column=1, columnspan=5, sticky="we",
+                      padx=(8, 0), pady=(8, 0))
+        self.nav.set_taxonomy(trade.category_taxonomy())
+
+        # row 2 — rarity + "Load case". Load case fills the stat bundles for the
+        # picked gear slot (Helmet / Boots / Ring …) — the old Archetype quick-pick,
+        # now keyed off whichever category chip is live (no separate dropdown). One
+        # click instead of hand-picking ~600 stats; bundles live in trade.ARCHETYPES.
+        self._lbl(f, "Rarity").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.cb_rar = self._combo(f, ["Any"] + [r for r in trade.RARITIES if r], "Any", 10)
+        self.cb_rar.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        cr = tk.Frame(f, bg=BG2)
+        cr.grid(row=2, column=2, columnspan=4, sticky="w", pady=(8, 0))
+        o_load_arch, self.btn_arch = seg_cell(cr, "Load case", width=78,
                                               first=True, font=_FONT)
-        o_load_arch.pack(side="left", padx=(6, 0))
+        o_load_arch.pack(side="left")
         self.btn_arch.bind("<Button-1>", lambda e: self._load_archetype())
         bind_seg_hover(self.btn_arch)
-        tk.Label(ar, text="HP/ES · Resist · Attrs (+ slot-specific)",
+        tk.Label(cr, text="HP/ES · Resist · Attrs (+ slot-specific)",
                  bg=BG2, fg=FG_MUTED, font=_FONT).pack(side="left", padx=(10, 0))
 
-        # row 2 — import: paste a cx trade link, read back its stat shortlist.
-        self._lbl(f, "From link").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        # row 3 — import: paste a cx trade link, read back its stat shortlist.
+        self._lbl(f, "From link").grid(row=3, column=0, sticky="w", pady=(6, 0))
         il = tk.Frame(f, bg=BG2)
-        il.grid(row=2, column=1, columnspan=5, sticky="we", padx=(8, 0), pady=(6, 0))
+        il.grid(row=3, column=1, columnspan=5, sticky="we", padx=(8, 0), pady=(6, 0))
         self.e_link = self._entry(il, 44)
         self.e_link.pack(side="left", fill="x", expand=True)
         o_imp, self.btn_import = seg_cell(il, "Read", width=52, first=True, font=_FONT)
         o_imp.pack(side="left", padx=(6, 0))
         self.btn_import.bind("<Button-1>", lambda e: self._import_link())
         bind_seg_hover(self.btn_import)
-
-        # row 3 — category + rarity
-        self._lbl(f, "Category").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        self._cat_by_label = {lab: cid for cid, lab in trade.CATEGORIES}
-        self._label_by_cat = {cid: lab for cid, lab in trade.CATEGORIES}
-        self.cb_cat = self._combo(f, [lab for _, lab in trade.CATEGORIES], "Any", 26)
-        self.cb_cat.grid(row=3, column=1, columnspan=2, sticky="w",
-                         padx=(8, 0), pady=(8, 0))
-        self._lbl(f, "Rarity").grid(row=3, column=3, sticky="e", padx=(8, 4), pady=(8, 0))
-        self.cb_rar = self._combo(f, ["Any"] + [r for r in trade.RARITIES if r], "Any", 10)
-        self.cb_rar.grid(row=3, column=4, columnspan=2, sticky="w", pady=(8, 0))
 
         # row 4 — req level min/max + price cap
         self._lbl(f, "Req level").grid(row=4, column=0, sticky="w", pady=(6, 0))
@@ -247,6 +260,15 @@ class TradePanel(tk.Frame):
         o_save.pack(side="left", padx=(4, 0))
         self.btn_save.bind("<Button-1>", lambda e: self._save_preset())
         bind_seg_hover(self.btn_save)
+        # Sort-by (far right of the actions row): trade2 sorts in the POST body,
+        # so opening with a sort picked here lands the tab already ordered. The
+        # list = fixed property columns + one entry per stat now in the builder.
+        self._sort_by_label = {}
+        self.cb_sort = self._combo(act, [trade.SORT_DEFAULT_LABEL],
+                                   trade.SORT_DEFAULT_LABEL, 24)
+        self.cb_sort.pack(side="right")
+        self._lbl(act, "Sort by").pack(side="right", padx=(0, 4))
+        self._refresh_sort_options()
 
         # row 9 — status line
         self.status = tk.Label(f, text="", bg=BG2, fg=FG_DIM, font=_MONO, anchor="w")
@@ -261,15 +283,37 @@ class TradePanel(tk.Frame):
                                 highlightbackground=BORDER_DARK)
         self.plist.pack(fill="both", expand=True, padx=8, pady=(8, 4))
         self.plist.bind("<Double-Button-1>", lambda e: self._open_selected())
+        # two rows: Load (-> edit in the form) / Open (-> browser);
+        #           Rename (re-key to the name box) / Delete.
         pb = tk.Frame(rf, bg=BG2)
         pb.pack(fill="x", padx=8, pady=(0, 8))
-        for text, w, cmd, first in (("Load", 52, self._load_selected, True),
-                                    ("Open", 52, self._open_selected, False),
-                                    ("✕", 24, self._delete_selected, False)):
-            outer, btn = seg_cell(pb, text, width=w, first=first, font=_FONT)
-            outer.pack(side="left")
-            btn.bind("<Button-1>", lambda e, c=cmd: c())
-            bind_seg_hover(btn)
+        for rowspec in (
+            (("Load", 56, self._load_selected), ("Open", 56, self._open_selected)),
+            (("Rename", 56, self._rename_selected), ("Delete", 56, self._delete_selected)),
+        ):
+            rowf = tk.Frame(pb, bg=BG2)
+            rowf.pack(fill="x", pady=(0, 2))
+            for j, (text, w, cmd) in enumerate(rowspec):
+                outer, btn = seg_cell(rowf, text, width=w, first=(j == 0), font=_FONT)
+                outer.pack(side="left")
+                btn.bind("<Button-1>", lambda e, c=cmd: c())
+                bind_seg_hover(btn)
+
+        # ★ my-stats card — the stats that appear in your presets (derived from
+        # them, never stored separately). Double-click adds one to the builder;
+        # a leading "+" flags stats no archetype quick-pick covers, and the gap
+        # line counts them — the "filters you use that the panel doesn't show".
+        self.slist = tk.Listbox(msf, bg=BG3, fg=FG, selectbackground=DULL_GRN,
+                                selectforeground=FG, activestyle="none",
+                                font=_MONO, width=28, height=8, relief="flat",
+                                highlightthickness=1,
+                                highlightbackground=BORDER_DARK)
+        self.slist.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        self.slist.bind("<Double-Button-1>", lambda e: self._add_mystat())
+        self.slist.bind("<<ListboxSelect>>", lambda e: self._mystat_selected())
+        self.lbl_gap = tk.Label(msf, text="", bg=BG2, fg=FG_MUTED, font=_FONT,
+                                anchor="w", justify="left")
+        self.lbl_gap.pack(fill="x", padx=8, pady=(0, 8))
 
     # ---------------------------------------------------------------- tagging
     # Inspector eids (greppable stems, see cx/CLAUDE.md): trade.* lives here.
@@ -279,17 +323,22 @@ class TradePanel(tk.Frame):
             return
         tm.tag(self.lbl_league, "trade.league")
         tm.tag(self.cb_status, "trade.form.status")
-        tm.tag(self.cb_arch, "trade.form.archetype")
+        tm.tag(self.cb_sort, "trade.form.sort")
+        # category is now the chip navigator (it self-tags trade.form.category.*);
+        # point the bare stem at the whole picker. The archetype dropdown is gone —
+        # "Load case" keeps its eid and is driven by the live category chip.
+        tm.tag(self.nav, "trade.form.category")
         tm.tag(self.btn_arch, "trade.form.archetype.load")
         tm.tag(self.e_link, "trade.form.fromlink")
         tm.tag(self.btn_import, "trade.form.fromlink.read")
-        tm.tag(self.cb_cat, "trade.form.category")
         tm.tag(self.cb_rar, "trade.form.rarity")
         tm.tag(self.e_search, "trade.form.statsearch")
         tm.tag(self.stats_frame, "trade.form.stats")
         tm.tag(self.btn_open, "trade.open")
         tm.tag(self.btn_save, "trade.save")
         tm.tag(self.plist, "trade.presets")
+        tm.tag(self.slist, "trade.mystats")
+        tm.tag(self.lbl_gap, "trade.mystats.gap")
         tm.tag(self.status, "trade.status")
 
     # ------------------------------------------------------------ stat picker
@@ -299,11 +348,16 @@ class TradePanel(tk.Frame):
             self._hide_sugg()
             return
         words = q.split()
-        self._sugg_items = [(i, t) for i, t in self._stat_opts
-                            if all(w in t.lower() or w in i for w in words)][:50]
+        matches = [(i, t) for i, t in self._stat_opts
+                   if all(w in t.lower() or w in i for w in words)]
+        # ★ first: stats you already use (appear in a preset) float to the top.
+        # Stable sort keeps the dictionary order within each group.
+        used = self._used
+        matches.sort(key=lambda it: it[0] not in used)
+        self._sugg_items = matches[:50]
         self.sugg.delete(0, "end")
-        for _i, t in self._sugg_items:
-            self.sugg.insert("end", t)
+        for i, t in self._sugg_items:
+            self.sugg.insert("end", ("★ " if i in used else "   ") + t)
         if self._sugg_items:
             self.sugg.config(height=min(8, len(self._sugg_items)))
             self.sugg.grid(row=6, column=1, columnspan=5, sticky="we", padx=(8, 0))
@@ -343,22 +397,65 @@ class TradePanel(tk.Frame):
         x.bind("<Enter>", lambda e: x.config(fg=RED))
         x.bind("<Leave>", lambda e: x.config(fg=FG_MUTED))
         self._stat_rows.append(entry)
+        self._refresh_sort_options()
 
     def _remove_stat_row(self, entry):
         self._stat_rows.remove(entry)
         entry[3].destroy()
+        self._refresh_sort_options()
 
     def _clear_stat_rows(self):
         for _sid, _mn, _mx, row in self._stat_rows:
             row.destroy()
         self._stat_rows = []
+        self._refresh_sort_options()
+
+    # ------------------------------------------------------------ sort options
+    def _refresh_sort_options(self):
+        """Rebuild the Sort-by list: fixed property columns + one entry per stat
+        currently in the builder (sort that stat high->low). Keeps the current
+        pick if it still exists, else falls back to the default (price asc)."""
+        if not hasattr(self, "cb_sort"):
+            return
+        labels, self._sort_by_label = [], {}
+        for label, sort in trade.SORT_PROPERTIES:
+            labels.append(label)
+            self._sort_by_label[label] = sort
+        for sid, _mn, _mx, _row in self._stat_rows:
+            text = self._text_by_id.get(sid, sid)
+            label = "▼ " + text[:38]
+            if label in self._sort_by_label:        # same mod text twice
+                label = f"{label} [{sid[-6:]}]"
+            self._sort_by_label[label] = trade.sort_for_stat(sid)
+            labels.append(label)
+        cur = self.cb_sort.get()
+        self.cb_sort.config(values=labels)
+        if cur not in self._sort_by_label:
+            self.cb_sort.set(trade.SORT_DEFAULT_LABEL)
+
+    def _select_sort(self, sort):
+        """Point the Sort-by combo at `sort` (a sort dict from a loaded preset).
+        Unknown sorts (e.g. a property column we don't list) are added verbatim
+        so a loaded link's sort is never silently dropped."""
+        if not sort or sort == trade.SORT_DEFAULT:
+            self.cb_sort.set(trade.SORT_DEFAULT_LABEL)
+            return
+        for label, s in self._sort_by_label.items():
+            if s == sort:
+                self.cb_sort.set(label)
+                return
+        key = next(iter(sort))
+        label = f"(raw) {key} {sort[key]}"
+        self._sort_by_label[label] = sort
+        self.cb_sort.config(values=list(self.cb_sort.cget("values")) + [label])
+        self.cb_sort.set(label)
 
     # ------------------------------------------------------- form <-> preset
     def _collect_preset(self) -> dict:
-        p = {"status": self.cb_status.get() or "available"}
-        cat = self._cat_by_label.get(self.cb_cat.get(), "")
-        if cat:
-            p["category"] = cat
+        p = {"status": trade.STATUS_BY_LABEL.get(
+            self.cb_status.get(), trade.STATUS_DEFAULT)}
+        if self._sel_category:
+            p["category"] = self._sel_category
         rar = self.cb_rar.get()
         if rar and rar != "Any":
             p["rarity"] = rar
@@ -380,11 +477,18 @@ class TradePanel(tk.Frame):
             stats.append(s)
         if stats:
             p["stats"] = stats
+        sort = self._sort_by_label.get(self.cb_sort.get())
+        if sort and sort != trade.SORT_DEFAULT:
+            p["sort"] = sort
         return p
 
     def _load_into_form(self, p: dict):
-        self.cb_status.set(p.get("status", "available"))
-        self.cb_cat.set(self._label_by_cat.get(p.get("category", ""), "Any"))
+        self.cb_status.set(trade.STATUS_LABELS.get(
+            p.get("status", trade.STATUS_DEFAULT),
+            trade.STATUS_LABELS[trade.STATUS_DEFAULT]))
+        cid = p.get("category", "") or ""
+        self._sel_category = cid
+        self.nav.select_value(cid)           # replay the chip path to this category
         self.cb_rar.set(p.get("rarity") or "Any")
         self.e_lvl_min.delete(0, "end")
         self.e_lvl_max.delete(0, "end")
@@ -405,22 +509,28 @@ class TradePanel(tk.Frame):
         for s in p.get("stats") or []:
             self._add_stat_row(s["id"], self._text_by_id.get(s["id"], s["id"]),
                                s.get("min"), s.get("max"))
+        # stat rows are now in place, so their sort entries exist — select last.
+        self._select_sort(p.get("sort"))
 
     # ----------------------------------------------------- archetype / import
-    def _load_archetype(self):
-        """Selected case -> fill the builder with its category + stat shortlist.
+    def _on_cat_leaf(self, leaf):
+        """A category chip pick -> remember its id (it drops straight into the
+        preset's ``category``) and echo the choice to the status line."""
+        self._sel_category = leaf.get("value", "") or ""
+        self._set_status(f"category: {leaf['label']}")
 
-        Non-destructive on the rest of the form: this swaps category + the stat
-        rows (the bundles that matter for the slot) but keeps status / price /
-        req-level so the user can flick between cases without re-typing those.
-        Each stat lands "present, any roll" — tighten min/max afterwards."""
-        label = self.cb_arch.get()
-        key = self._arch_by_label.get(label)
+    def _load_archetype(self):
+        """Fill the builder with the stat bundles for the LIVE category chip — the
+        quick-pick "case" for a gear slot (Helmet / Boots / Ring …). Driven by the
+        category navigator now (no separate Archetype dropdown); leaves status /
+        price / req-level untouched so you can flick between slots. Each stat lands
+        "present, any roll" — tighten min/max afterwards."""
+        key = self._arch_by_category.get(self._sel_category)
         if not key:
-            self._set_status("pick an archetype first", err=True)
+            self._set_status("pick a gear slot category first (Helmet / Boots / "
+                             "Ring …) — no quick-pick case for this one", err=True)
             return
         arch = trade.ARCHETYPES[key]
-        self.cb_cat.set(self._label_by_cat.get(arch["category"], "Any"))
         self._clear_stat_rows()
         for sid in trade.archetype_stats(key):
             self._add_stat_row(sid, self._text_by_id.get(sid, sid))
@@ -446,14 +556,28 @@ class TradePanel(tk.Frame):
     # ---------------------------------------------------------------- actions
     def _set_status(self, text, err=False):
         self.status.config(text=text, fg=RED if err else FG_DIM)
+        # mirror every status line to the terminal so failures are visible in
+        # the console (python -m cx) without having to screenshot the GUI.
+        stream = sys.stderr if err else sys.stdout
+        print(f"[trade] {'ERROR: ' if err else ''}{text}", file=stream, flush=True)
 
     def _open_preset_dict(self, p: dict, label: str):
         if not self._league:
             self._set_status("league unknown — run a cycle (DB) or check network", err=True)
             return
         url = trade.preset_to_url(p, self._league)
+        # Surface the #cxq hand-off link: this is the ONLY place the decodable
+        # link exists — the browser redirects to a stored-search URL (no #cxq)
+        # the instant the userscript's POST lands. Drop it into the From-link
+        # box so "Read" round-trips it straight back, and echo it to the
+        # terminal so it can be grabbed from the console.
+        self.e_link.delete(0, "end")
+        self.e_link.insert(0, url)
+        print(f"[trade] opened ({label}): {url}", flush=True)
         webbrowser.open(url, new=2)
-        self._set_status(f"→ tab opened: {label} (userscript finishes the POST)")
+        self._set_status(
+            f"→ tab opened: {label} — #cxq link put in the From-link box "
+            "(hit Read to load it back)")
 
     def _open_form(self):
         self._open_preset_dict(self._collect_preset(), "form")
@@ -464,16 +588,67 @@ class TradePanel(tk.Frame):
             self._set_status("preset name is empty", err=True)
             return
         presets = trade.load_presets()
+        verb = "updated" if name in presets else "saved"  # overwrite vs new
         presets[name] = self._collect_preset()
         trade.save_presets(presets)
+        self._editing = name
         self._reload_presets()
-        self._set_status(f"saved: {name}")
+        self._set_status(f"{verb}: {name}")
 
     def _reload_presets(self):
         self._presets = trade.load_presets()
+        self._used = trade.used_stats(self._presets)   # derive the ★ set
         self.plist.delete(0, "end")
         for name in sorted(self._presets):
             self.plist.insert("end", name)
+        self._reload_mystats()
+
+    def _reload_mystats(self):
+        """Fill the ★-stats list from self._used (stat -> presets), most-used
+        first. Marks stats no archetype quick-pick covers with a leading "+" and
+        tallies that gap — the filters you use that the panel doesn't surface."""
+        if not hasattr(self, "slist"):
+            return
+        arch = trade.all_archetype_stats()
+        self.slist.delete(0, "end")
+        self._mystat_ids = []
+        items = sorted(
+            self._used.items(),
+            key=lambda kv: (-len(kv[1]), self._text_by_id.get(kv[0], kv[0]).lower()))
+        gap = 0
+        for sid, _names in items:
+            label = self._text_by_id.get(sid, sid)
+            covered = sid in arch
+            if not covered:
+                gap += 1
+            self.slist.insert("end", ("  " if covered else "+ ") + label[:38])
+            self._mystat_ids.append(sid)
+        if items:
+            self.lbl_gap.config(
+                text=f"{len(items)} stat(s) you use · {gap} not in quick-picks (+)")
+        else:
+            self.lbl_gap.config(text="empty — capture a search, Save a preset")
+
+    def _mystat_selected(self):
+        """Show the stat→preset link (which presets use the picked ★-stat)."""
+        sel = self.slist.curselection()
+        if not sel:
+            return
+        sid = self._mystat_ids[sel[0]]
+        names = self._used.get(sid, [])
+        self._set_status(f"{self._text_by_id.get(sid, sid)} — in: {', '.join(names)}")
+
+    def _add_mystat(self):
+        """Double-click a ★-stat -> drop it into the builder (no duplicate row)."""
+        sel = self.slist.curselection()
+        if not sel:
+            return
+        sid = self._mystat_ids[sel[0]]
+        if any(r[0] == sid for r in self._stat_rows):
+            self._set_status("already in the builder")
+            return
+        self._add_stat_row(sid, self._text_by_id.get(sid, sid))
+        self._set_status(f"added: {self._text_by_id.get(sid, sid)}")
 
     def _selected_name(self):
         sel = self.plist.curselection()
@@ -485,12 +660,41 @@ class TradePanel(tk.Frame):
             self._load_into_form(self._presets[name])
             self.e_name.delete(0, "end")
             self.e_name.insert(0, name)
-            self._set_status(f"loaded: {name}")
+            self._editing = name
+            self._set_status(f"loaded: {name} — edit the form, then Save to update")
 
     def _open_selected(self):
         name = self._selected_name()
         if name:
             self._open_preset_dict(self._presets[name], name)
+
+    def _rename_selected(self):
+        """Re-key the selected preset to the name in the name box (content kept).
+
+        Pairs with Save: Save writes the form under the name box (new name -> a
+        copy), Rename moves the existing preset to that name. Load fills the name
+        box with the current name, so the flow is: select -> Load -> edit name ->
+        Rename."""
+        old = self._selected_name()
+        if not old:
+            self._set_status("select a preset to rename", err=True)
+            return
+        new = self.e_name.get().strip()
+        if not new:
+            self._set_status("type the new name in the name box first", err=True)
+            return
+        if new == old:
+            self._set_status("name unchanged")
+            return
+        presets = trade.load_presets()
+        if new in presets:
+            self._set_status(f"'{new}' already exists — pick another name", err=True)
+            return
+        presets[new] = presets.pop(old)
+        trade.save_presets(presets)
+        self._editing = new
+        self._reload_presets()
+        self._set_status(f"renamed: {old} → {new}")
 
     def _delete_selected(self):
         name = self._selected_name()
@@ -498,5 +702,7 @@ class TradePanel(tk.Frame):
             presets = trade.load_presets()
             presets.pop(name, None)
             trade.save_presets(presets)
+            if name == self._editing:
+                self._editing = None
             self._reload_presets()
             self._set_status(f"deleted: {name}")

@@ -32,7 +32,8 @@ def build_search_query(preset: dict) -> dict:
     """Assemble a trade2 search body from a preset's pre-fields.
 
     Pre-fields (all optional):
-      status    : "available" (default) | "online" | "any"
+      status    : "available" (default) | "securable" | "onlineleague" |
+                  "online" | "any"   (see STATUS_LABELS for the trade2 names)
       stats     : list of {"id": <stat id>, "min": .., "max": ..}  (min/max optional;
                   omit both -> "mod present, any roll")
       category  : str, e.g. "armour.helmet"            -> filters.type_filters.category
@@ -166,10 +167,45 @@ def archetype_preset(name: str, **overrides) -> dict:
     return p
 
 
+def all_archetype_stats() -> set:
+    """Every stat id surfaced by some archetype quick-pick (across all slots).
+
+    Used to spot the gap: stats you actually use (from presets) that NO archetype
+    bundle offers as a one-click pick — the "what the Trade panel doesn't show"."""
+    out = set()
+    for name in ARCHETYPES:
+        out.update(archetype_stats(name))
+    return out
+
+
+def used_stats(presets: dict) -> dict:
+    """{stat id -> [preset names that use it]} across all saved presets.
+
+    The "★ stats you use" surface is *derived, not stored*: a stat counts as one
+    you use iff it appears in >=1 preset, and the value is exactly the stat→preset
+    link the UI shows. Re-derived whenever presets change, so there is nothing to
+    keep in sync (no separate library file). Presets are the single source of
+    truth; capturing a live search and saving it as a preset is what earns the
+    star."""
+    out = {}
+    for name, p in (presets or {}).items():
+        for s in (p or {}).get("stats") or []:
+            sid = s.get("id")
+            if not sid:
+                continue
+            names = out.setdefault(sid, [])
+            if name not in names:
+                names.append(name)
+    for names in out.values():
+        names.sort(key=str.lower)
+    return out
+
+
 # ---- read a trade2 link back into a preset (reverse of preset_to_url) -------
-def _query_to_preset(q: dict) -> dict:
+def _query_to_preset(q: dict, sort: dict = None) -> dict:
     """Trade2 search *query* block -> preset pre-fields (best-effort, lossless
-    for the fields the builder edits)."""
+    for the fields the builder edits). `sort` is the body's sibling sort block;
+    kept only when it differs from the trade2 default (price asc)."""
     p = {}
     status = (q.get("status") or {}).get("option")
     if status:
@@ -202,6 +238,8 @@ def _query_to_preset(q: dict) -> dict:
     price = ((filters.get("trade_filters") or {}).get("filters") or {}).get("price")
     if price:
         p["price"] = price
+    if sort and sort != SORT_DEFAULT:
+        p["sort"] = sort
     return p
 
 
@@ -227,9 +265,22 @@ def parse_trade_url(url: str) -> dict:
         import re
         m = re.search(r"(?:^|[#&])cxq=([^&]+)", "#" + frag)
     if not m:
+        # Tell the user exactly what went wrong. The usual cause is pasting a
+        # *resolved* stored-search URL (…/search/poe2/<league>/<id>) copied from
+        # the address bar — by then the browser has dropped the #cxq fragment.
+        import re
+        path = url.split("#", 1)[0].split("?", 1)[0]
+        ss = re.search(r"/search/poe2/[^/]+/([^/]+)/?$", path)
+        if ss:
+            raise ValueError(
+                f"this is a stored-search link (server id '{ss.group(1)}') — its "
+                "filters live on GGG's server and can't be decoded offline. Paste "
+                "the cx #cxq hand-off link instead — it's printed in the console "
+                "and dropped into the From-link box when you Open a preset.")
         raise ValueError(
-            "no #cxq= payload in this link — only cx hand-off links carry their "
-            "filters in the URL; a plain stored-search link can't be decoded")
+            "no #cxq= payload in this link — only cx hand-off links (…#cxq=…) "
+            "carry their filters in the URL. Open a preset to generate one (it's "
+            "printed in the console and put in the From-link box).")
     raw = m.group(1)
     pad = "=" * (-len(raw) % 4)
     try:
@@ -239,7 +290,7 @@ def parse_trade_url(url: str) -> dict:
     q = body.get("query") if isinstance(body, dict) else None
     if not isinstance(q, dict):
         raise ValueError("payload has no query block")
-    return _query_to_preset(q)
+    return _query_to_preset(q, body.get("sort") if isinstance(body, dict) else None)
 
 
 def preset_to_url(preset: dict, league: str) -> str:
@@ -297,8 +348,90 @@ CATEGORIES = [
     ("currency.soulcore", "Soul Core"), ("currency.idol", "Idol"),
 ]
 RARITIES = ["", "normal", "magic", "rare", "unique", "uniquefoil", "nonunique"]
-STATUS_OPTIONS = ["available", "online", "any"]
+# trade2 status.option values, in the site's dropdown order. First entry is the
+# site default. Labels mirror the trade2 dropdown exactly.
+STATUS_OPTIONS = ["available", "securable", "onlineleague", "online", "any"]
+STATUS_LABELS = {
+    "available":    "Instant Buyout and In Person",
+    "securable":    "Instant Buyout",
+    "onlineleague": "In Person (Online in League)",
+    "online":       "In Person (Online)",
+    "any":          "Any",
+}
+STATUS_DEFAULT = "available"
+# labels in dropdown order, and the reverse label -> option lookup
+STATUS_LABEL_LIST = [STATUS_LABELS[o] for o in STATUS_OPTIONS]
+STATUS_BY_LABEL = {label: opt for opt, label in STATUS_LABELS.items()}
 PRICE_OPTIONS = ["exalted", "divine", "chaos", "annul", "regal", "alch"]
+
+# ---- result sorting ---------------------------------------------------------
+# trade2 sorts inside the POST body's top-level "sort" key, NOT in the URL — the
+# stored-search id is the same regardless of sort, which is why clicking a column
+# never changes the address bar. Two shapes (captured live 2026-06):
+#   item property column -> {"<data-field>": "desc"}   e.g. {"ar":"desc"} (Armour)
+#   a filtered stat      -> {"stat.<id>":  "desc"}      e.g. {"stat.pseudo.pseudo_total_cold_resistance":"desc"}
+#   price (site default) -> {"price": "asc"}
+SORT_DEFAULT = {"price": "asc"}
+# (label, sort) for the fixed item-property columns the dropdown always offers.
+SORT_PROPERTIES = [
+    ("Price (cheapest first)", {"price": "asc"}),
+    ("Armour ▼",               {"ar": "desc"}),
+    ("Evasion ▼",              {"ev": "desc"}),
+    ("Energy Shield ▼",        {"es": "desc"}),
+    ("Total DPS ▼",            {"dps": "desc"}),
+    ("Physical DPS ▼",         {"pdps": "desc"}),
+    ("Elemental DPS ▼",        {"edps": "desc"}),
+]
+SORT_DEFAULT_LABEL = SORT_PROPERTIES[0][0]
+
+
+def sort_for_stat(stat_id: str, direction: str = "desc") -> dict:
+    """Sort key for one of the filter's stats (highest roll first by default).
+
+    Mirrors what the trade2 site sends when you click a filtered-mod column:
+    ``{"stat.<id>": "desc"}``."""
+    return {"stat." + stat_id: direction}
+
+# Display labels for the category chip navigator's meta row (EquipmentNav). The
+# dotted category ids give the tree for free: the segment before the first dot is
+# the meta, and the bare "weapon"/"armour"/… entries are each meta's "Any X" leaf.
+_CAT_META_LABEL = {
+    "weapon": "Weapon", "armour": "Armour", "accessory": "Accessory",
+    "gem": "Gem", "jewel": "Jewel", "flask": "Flask", "map": "Endgame",
+    "card": "Cards", "sanctum": "Sanctum", "currency": "Currency",
+}
+
+
+def category_taxonomy():
+    """CATEGORIES -> the EquipmentNav meta→leaf taxonomy (a chip tree replacing the
+    old category dropdown). Each top-level segment ('weapon', 'armour', …) becomes a
+    meta whose leaves are its dotted members plus the bare 'Any <meta>' id; a meta
+    with a single id (Jewel, Cards) collapses to a terminal meta chip; the lone
+    ('', 'Any') entry is a standalone 'Any' meta that clears the category filter.
+    Pure restructuring of CATEGORIES — the same option ids come back out as leaf
+    ``value``s, so the picked value drops straight into a preset's ``category``."""
+    order, buckets = [], {}
+    for cid, label in CATEGORIES:
+        meta = cid.split(".", 1)[0] if cid else ""
+        if meta not in buckets:
+            buckets[meta] = []
+            order.append(meta)
+        buckets[meta].append((cid, label))
+    metas = []
+    for meta in order:
+        entries = buckets[meta]
+        if meta == "":                       # the lone ("", "Any") -> clear filter
+            metas.append({"key": "any", "label": "Any", "value": ""})
+            continue
+        leaves = [{"key": cid or meta, "label": label, "value": cid}
+                  for cid, label in entries]
+        meta_label = _CAT_META_LABEL.get(meta, meta.title())
+        if len(leaves) == 1:                 # single id (Jewel, Cards) -> terminal
+            metas.append({"key": meta, "label": meta_label,
+                          "value": leaves[0]["value"]})
+        else:
+            metas.append({"key": meta, "label": meta_label, "children": leaves})
+    return metas
 
 # Embedded fallback for the stat picker: the full pseudo group. The complete
 # dictionary (explicit ~600 ids etc.) comes from stat_options() at runtime.

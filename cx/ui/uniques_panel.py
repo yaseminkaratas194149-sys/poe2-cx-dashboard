@@ -38,6 +38,8 @@ from cx import config
 from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, BORDER, DULL_GRN, RED,
                     HOVER_BG)
 from .icons import IconCache
+from .row_table import RowTable
+from .equipment_nav import EquipmentNav
 
 ICON_SIZE = 22
 STRIPE_A, STRIPE_B = BG3, "#272728"
@@ -162,6 +164,27 @@ def weapon_hand_and_type(weapon_class):
     if wc in _ONE_HAND:
         return "1H", wc
     return None, wc
+
+
+# Weapon CATEGORY split for the scope bar (row 1, to the right of All/1H/2H). Range
+# = bows & crossbows; Melee = the martial classes (incl. Talisman, per request);
+# Caster = everything else (Wand/Sceptre/Staff/Warstaff). Driven off the short
+# weapon type (wtype); the catch-all into Caster keeps any new class reachable.
+_RANGE_TYPES = {"Bow", "Crossbow"}
+_MELEE_TYPES = {"Mace", "Sword", "Axe", "Quarterstaff", "Spear", "Talisman",
+                "Flail", "Dagger", "Claw"}
+# row-1 scope chips, in order: hand split then category split.
+_WSCOPE_ORDER = ["All", "1H", "2H", "Melee", "Range", "Caster"]
+
+
+def weapon_category(short_type):
+    """Melee / Range / Caster bucket for a short weapon type (wtype). Range = bows &
+    crossbows; Melee = the martial classes (incl. Talisman); Caster = the rest."""
+    if short_type in _RANGE_TYPES:
+        return "Range"
+    if short_type in _MELEE_TYPES:
+        return "Melee"
+    return "Caster"
 
 
 _GROUP_ORDER = ["Weapons", "Offhands", "Body Armours", "Helmets", "Gloves",
@@ -319,6 +342,24 @@ def _hi_roll(text):
     return float(m.group(0)) if m else None
 
 
+def _roll_range(text):
+    """The (lo, hi) of the first roll range in *text*: "(50-75)"->(50.0, 75.0),
+    "(-20--10)"->(-20.0, -10.0), a bare "12"->(12.0, 12.0), or None. Mirror of
+    _hi_roll that keeps both bounds, so a fixed value (lo==hi) is distinguishable
+    from a rolled range."""
+    if text is None:
+        return None
+    m = _RANGE_RE.search(str(text))
+    if m:
+        try:
+            a, b = float(m.group(1)), float(m.group(2))
+        except ValueError:
+            return None
+        return (min(a, b), max(a, b))
+    m = re.search(_NUM, str(text))
+    return (float(m.group(0)), float(m.group(0))) if m else None
+
+
 # Per-element resistance mod templates: "...to Fire Resistance" etc. "all
 # Elemental Resistances" feeds all three. MAXIMUM-resistance and penetration lines
 # are deliberately excluded — this column is the flat elemental resist a piece adds.
@@ -333,33 +374,55 @@ _MAX_RES_RE = re.compile(r"Maximum", re.I)
 
 def elemental_resists(explicits):
     """The flat Fire/Cold/Lightning resistance an armour piece grants, as a dict
-    {fire,cold,lightning} of high-roll ints, or {} if it grants none. 'to all
-    Elemental Resistances' counts for all three; Maximum-resistance lines skip."""
+    {fire,cold,lightning} -> (lo, hi) roll range (lo==hi for a fixed value), or {}
+    if it grants none. 'to all Elemental Resistances' counts for all three;
+    Maximum-resistance lines skip; several mods on one element add interval-wise."""
     out = {}
     for m in (explicits or []):
         if _MAX_RES_RE.search(m):
             continue
-        val = _hi_roll(m)
-        if val is None:
+        rng = _roll_range(m)
+        if rng is None:
             continue
         if _ALL_ELE_RE.search(m):
-            for e in ("fire", "cold", "lightning"):
-                out[e] = out.get(e, 0) + val
+            elems = ("fire", "cold", "lightning")
         else:
-            for e, rx in _RESIST_RE.items():
-                if rx.search(m):
-                    out[e] = out.get(e, 0) + val
-    return {e: int(round(v)) for e, v in out.items()}
+            elems = tuple(e for e, rx in _RESIST_RE.items() if rx.search(m))
+        for e in elems:
+            lo, hi = out.get(e, (0.0, 0.0))
+            out[e] = (lo + rng[0], hi + rng[1])
+    return {e: (int(round(lo)), int(round(hi))) for e, (lo, hi) in out.items()}
 
 
-def resist_cells(explicits):
-    """Armour resist column text: "fire cold lightning" (high rolls) when the piece
-    grants any elemental resistance, else "" — so 0-of-3 reads as an empty cell and
-    e.g. fire-only as "16 0 0". (Ticket's "16 0 10" = +16 fire, 0 cold, +10 ltng.)"""
+# Resist cell tints — slight dark backgrounds over the dark rows, one hue per
+# element (fire=red, cold=blue, lightning=yellow); kept subtle so the row striping
+# still reads through. The collapsed 'all elements' case gets a neutral tint, since
+# no single element owns it. (bg, fg) pairs.
+RES_TINT = {
+    "fire":      ("#3a2020", "#e6a0a0"),
+    "cold":      ("#1e2742", "#9cc0ee"),
+    "lightning": ("#3a3520", "#e6d79a"),
+}
+RES_ALL_TINT = ("#2b2b30", "#d0d0d0")
+
+
+def resist_segments(explicits):
+    """The armour resist cell as RowTable colour segments — a list of (text, bg, fg),
+    one tinted box per element (Fire/Cold/Lightning), or [] when the piece grants
+    none. Text mirrors the old text form: a fixed value is a plain int, a rolled
+    range is "lo-hi" (no parens — the colour tint already sets the cell apart); an
+    'all Elemental Resistances' piece (every element identical) collapses to a
+    single neutral-tinted segment."""
     res = elemental_resists(explicits)
     if not res:
-        return ""
-    return " ".join(str(res.get(e, 0)) for e in ("fire", "cold", "lightning"))
+        return []
+    def txt(lo, hi):
+        return str(lo) if lo == hi else f"{lo}-{hi}"
+    triad = [res.get(e, (0, 0)) for e in ("fire", "cold", "lightning")]
+    if triad[0] == triad[1] == triad[2]:
+        return [(txt(*triad[0]), RES_ALL_TINT[0], RES_ALL_TINT[1])]
+    return [(txt(lo, hi), RES_TINT[e][0], RES_TINT[e][1])
+            for e, (lo, hi) in zip(("fire", "cold", "lightning"), triad)]
 
 
 # Weapon DPS = average hit * attacks/sec. The damage props are ranges ("6-9"); the
@@ -413,6 +476,8 @@ class UniquesPanel(tk.Frame):
         self._sel_sub = None
         self._sel_attrs = set()      # armour groups: chosen {Str,Dex,Int} (AND filter)
         self._attr_all = False       # armour groups: the neutral "All" mode
+        self._sel_wscope = None      # weapons: scope chip (All/1H/2H/Melee/Range/Caster)
+        self._sel_wtype = None       # weapons: archetype chip within scope, None = all
         self._row_item = {}          # tree rowid -> item dict (for the detail card)
         self._card = None            # the open detail-card Toplevel, or None
         self._icon_q = queue.Queue()
@@ -428,44 +493,51 @@ class UniquesPanel(tk.Frame):
 
     # ------------------------------------------------------------------
     # inspector tagging — point at this browser's parts, not just describe them.
-    # The chip rows are repeated widgets: each chip is tagged with the stem
-    # `uniques.meta[<name>]` (top tier, in _render_groups), `uniques.group[<name>]`
-    # / `uniques.base[<name>]` (in _chip) or, for armour groups,
-    # `uniques.attr[<Str|Dex|Int|All>]` (in _attr_chip), so a non-Ctrl pick greps
-    # back to the chip-builder and Ctrl pins one chip. No-op without a TiketMaster
-    # handle, so the panel still runs standalone. groupbar = the whole two-row top
-    # block; meta_bar / group_row are its meta row and its expanded-group row.
+    # The meta / group / base chip rows live in EquipmentNav now, which tags both
+    # the row frames (uniques.groupbar / metabar / grouprow / basebar) and each chip
+    # (`uniques.meta[<name>]`, `uniques.group[<name>]`, `uniques.base[<name>]`) under
+    # the "uniques" prefix — so the stems are unchanged. The two data-coupled bars
+    # still tag here: `uniques.wtype[<name>]` (weapon types, via _chip) and
+    # `uniques.attr[<Str|Dex|Int|All>]` (in _attr_chip). No-op without a TiketMaster
+    # handle, so the panel still runs standalone.
     def _tag_widgets(self):
         tm = self.tm
         if tm is None:
             return
-        tm.tag(self.group_bar, "uniques.groupbar")
-        tm.tag(self.meta_bar, "uniques.metabar")
-        tm.tag(self.group_row, "uniques.grouprow")
-        tm.tag(self.sub_bar, "uniques.basebar")
-        tm.tag(self.sub_label, "uniques.basebar.label")
+        # groupbar / metabar / grouprow / basebar(.label) are tagged by EquipmentNav
+        # itself (eid_prefix="uniques"), so the inspector stems are unchanged.
         tm.tag(self.list_title, "uniques.title")
         tm.tag(self.list_sub, "uniques.subtitle")
         tm.tag_table(self.tv, "uniques.tree", row_label=lambda t, r: t.item(r, "text"))
 
+    # the chip rows are now the shared EquipmentNav body (meta → group → base); this
+    # panel keeps only the weapon scope rows and the Str/Dex/Int attribute toggles
+    # (data-coupled to the unique DB), plugged in as leaf-bar hooks. sub_bar /
+    # sub_label proxy the nav's so the weapon/attr builders read unchanged.
+    @property
+    def sub_bar(self):
+        return self.nav.sub_bar
+
+    @property
+    def sub_label(self):
+        return self.nav.sub_label
+
+    def _chip(self, parent, text, active, cmd, eid=None):
+        """Shared-styling chip (delegates to the nav) — used by the weapon scope
+        rows; the attr toggles use the coloured _attr_chip instead."""
+        return self.nav.make_chip(parent, text, active, cmd, eid_key=eid)
+
     # ------------------------------------------------------------------ build
     def _build(self):
-        # Top tier is two rows (ticket 1): meta_bar (fixed Weapon/Offhands/Armour/
-        # Others) over group_row (the chosen meta's groups, all in one line).
-        self.group_bar = tk.Frame(self, bg=BG)
-        self.group_bar.pack(fill="x", pady=(0, 4))
-        self.meta_bar = tk.Frame(self.group_bar, bg=BG)
-        self.meta_bar.pack(fill="x")
-        self.group_row = tk.Frame(self.group_bar, bg=BG)
-        self.group_row.pack(fill="x", pady=(3, 0))
-
-        sub_wrap = tk.Frame(self, bg=BG2)
-        sub_wrap.pack(fill="x", pady=(0, 6))
-        self.sub_label = tk.Label(sub_wrap, text="", bg=BG2, fg=FG_MUTED,
-                                  font=("Segoe UI", 8))
-        self.sub_label.pack(anchor="w", padx=8, pady=(4, 0))
-        self.sub_bar = tk.Frame(sub_wrap, bg=BG2)
-        self.sub_bar.pack(fill="x", padx=6, pady=(2, 6))
+        # The fixed meta row, the chosen meta's group row and the base bar are the
+        # shared EquipmentNav (same body as the Trade tab). It drives FILTER here:
+        # _on_meta/_on_group/_on_leaf react against the local unique DB, and the
+        # Weapons / armour groups hand their base bar to the hooks below.
+        self.nav = EquipmentNav(
+            self, tm=self.tm, eid_prefix="uniques",
+            on_meta=self._on_meta, on_group=self._on_group, on_leaf=self._on_leaf,
+            leaf_hooks={"weapon": self._weapon_hook, "attr": self._attr_hook})
+        self.nav.pack(fill="x")
 
         outer = tk.Frame(self, bg=BORDER)
         outer.pack(fill="both", expand=True)
@@ -485,8 +557,8 @@ class UniquesPanel(tk.Frame):
         # selected group and is set by _set_info_headers() — armour shows elemental
         # resistances (fire cold lightning) in c1; weapons show phys/ele DPS in c1/c2;
         # everything else falls back to the first mod in c1. Headers default to mod.
-        self.tv = ttk.Treeview(bodyf, columns=["lvl", "c1", "c2"],
-                               show="tree headings")
+        self.tv = RowTable(bodyf, ["lvl", "c1", "c2"],
+                           rowheight=26, icon_w=ICON_SIZE)
         self.tv.heading("#0", text="unique")
         self.tv.column("#0", width=210, minwidth=120, anchor="w", stretch=True)
         self.tv.heading("lvl", text="lvl")
@@ -514,19 +586,6 @@ class UniquesPanel(tk.Frame):
         self.ph = tk.Label(bodyf, text="", bg=BG3, fg=FG_MUTED,
                            font=("Segoe UI", 9), justify="center")
 
-    def _chip(self, parent, text, active, cmd, eid=None):
-        bg = DULL_GRN if active else BG3
-        fg = FG if active else FG_DIM
-        lab = tk.Label(parent, text=text, bg=bg, fg=fg, font=("Segoe UI", 9),
-                       padx=10, pady=4, cursor="hand2")
-        lab._active = active
-        lab.bind("<Button-1>", lambda e: cmd())
-        lab.bind("<Enter>", lambda e: lab.config(bg=(DULL_GRN if lab._active else HOVER_BG)))
-        lab.bind("<Leave>", lambda e: lab.config(bg=(DULL_GRN if lab._active else BG3)))
-        if self.tm is not None and eid:          # greppable: the [name] stem -> _chip
-            self.tm.tag(lab, eid)
-        return lab
-
     # ------------------------------------------------------------------- data
     def refresh(self):
         conn = None
@@ -544,7 +603,7 @@ class UniquesPanel(tk.Frame):
             except Exception:
                 rows = []
             self._index(rows)
-            self._render_groups()
+            self._render_nav()
         finally:
             if conn is not None:
                 conn.close()
@@ -591,152 +650,226 @@ class UniquesPanel(tk.Frame):
         return sum(sum(len(v) for v in self._data[g].values())
                    for g in self._meta_members(meta))
 
-    def _render_groups(self):
-        # Top row: the fixed meta-categories (ticket 1). The second row (group_row)
-        # stays empty until a meta is picked, then opens that meta's groups in a line.
-        for w in self.meta_bar.winfo_children():
-            w.destroy()
-        for w in self.group_row.winfo_children():
-            w.destroy()
-        groups = self._ordered_groups()
-        if not groups:
-            self.sub_label.config(text="")
-            for w in self.sub_bar.winfo_children():
-                w.destroy()
-            self._fill_items([])
+    def _render_nav(self):
+        """(Re)build the chip navigator from the unique DB and reset the list to its
+        hint. The nav owns the chip rows now; this just feeds it the taxonomy and
+        handles the empty-DB case (no metas)."""
+        self._sel_group = None
+        metas = self._build_taxonomy()
+        self.nav.set_taxonomy(metas)
+        self._fill_items([])
+        if not metas:
             self._show_ph(f"no uniques in {self._schema}\nrun  python -m cx.uniques")
-            return
-        metas = [m for m in _META_ORDER if self._meta_members(m)]
-        for i, m in enumerate(metas):
-            chip = self._chip(self.meta_bar, f"{m}  {self._meta_count(m)}", False,
-                              lambda mm=m: self._select_meta(mm),
-                              eid=f"uniques.meta[{m}]")
-            chip.grid(row=0, column=i, padx=2, pady=2, sticky="w")
-        # hidden by default: meta row only — nothing picked, list empty (on request)
-        self._sel_meta = None
-        self._sel_group = None
-        self._sel_sub = None
-        self._sel_attrs = set()
-        self._attr_all = False
-        for w in self.sub_bar.winfo_children():
-            w.destroy()
-        self.sub_label.config(text="")
-        self._fill_items([])
-        self._show_ph("выбери категорию ↑")
+        else:
+            self._show_ph("выбери категорию ↑")
 
-    def _select_meta(self, meta):
-        """Top-row pick: highlight the meta-chip and open its member groups in the
-        second row (all in one line). Clears any group / base selection below."""
-        self._sel_meta = meta
-        self._sel_group = None
-        self._sel_sub = None
-        self._sel_attrs = set()
-        self._attr_all = False
-        for w in self.meta_bar.winfo_children():
-            on = w.cget("text").rsplit("  ", 1)[0] == meta
-            w._active = on
-            w.config(bg=DULL_GRN if on else BG3, fg=FG if on else FG_DIM)
-        for w in self.group_row.winfo_children():
-            w.destroy()
-        for w in self.sub_bar.winfo_children():
-            w.destroy()
-        for i, g in enumerate(self._meta_members(meta)):
-            n = sum(len(v) for v in self._data[g].values())
-            chip = self._chip(self.group_row, f"{g}  {n}", False,
-                              lambda gg=g: self._select_group(gg),
-                              eid=f"uniques.group[{g}]")
-            chip.grid(row=0, column=i, padx=2, pady=2, sticky="w")
-        self.sub_label.config(text="")
-        self._fill_items([])
-        self._show_ph("← выбери категорию")
+    def _build_taxonomy(self):
+        """unique DB -> the EquipmentNav taxonomy: present metas (Weapon / Offhands /
+        Armour / Others) → their member groups → base chips. The Weapons group and
+        the armour (attribute) groups carry a ``leaf_mode`` so the nav hands their
+        base bar to _weapon_hook / _attr_hook; every other group lists base-name
+        leaves whose ``value`` is ("sub", group, base) for _on_leaf to fill from."""
+        metas = []
+        for m in _META_ORDER:
+            members = self._meta_members(m)
+            if not members:
+                continue
+            groups = []
+            for g in members:
+                gcount = sum(len(v) for v in self._data[g].values())
+                if g == "Weapons":
+                    groups.append({"key": g, "label": g, "count": gcount,
+                                   "leaf_mode": "weapon"})
+                elif g in _ATTR_GROUPS:
+                    groups.append({"key": g, "label": g, "count": gcount,
+                                   "leaf_mode": "attr"})
+                else:
+                    subs = self._data.get(g, {})
+                    order = ["All"] + [s for s, _ in sorted(
+                        subs.items(),
+                        key=lambda kv: (-len(kv[1]), kv[0]))][:_MAX_SUBCHIPS]
+                    leaves = [{"key": s, "label": s,
+                               "count": (gcount if s == "All" else len(subs[s])) or 0,
+                               "value": ("sub", g, s)} for s in order]
+                    groups.append({"key": g, "label": g, "count": gcount,
+                                   "children": leaves})
+            metas.append({"key": m, "label": m, "count": self._meta_count(m),
+                          "children": groups})
+        return metas
 
-    def _select_group(self, group):
-        self._sel_group = group
+    # ---- nav callbacks: a pick FILTERS the local unique list -------------------
+    def _on_meta(self, meta):
+        """Multi-member meta picked: wait for a group. (Single-member metas auto-open
+        their group's base bar, so _on_group handles those.)"""
+        if len(meta.get("children") or []) > 1:
+            self._fill_items([])
+            self._show_ph("← выбери категорию")
+
+    def _on_group(self, group):
+        """Group picked: retitle the info columns and prime the base bar. Weapons and
+        the armour attribute groups are built by their hooks (the nav calls them right
+        after this); plain groups get a label + 'pick a base' hint while the nav
+        renders their base chips."""
+        g = group["key"]
+        self._sel_group = g
         self._sel_sub = None
         self._sel_attrs = set()
         self._attr_all = False
-        self._set_info_headers(group)            # retitle c1/c2 for this group's kind
-        for w in self.group_row.winfo_children():     # only the expanded group chips
-            on = w.cget("text").rsplit("  ", 1)[0] == group
-            w._active = on
-            w.config(bg=DULL_GRN if on else BG3, fg=FG if on else FG_DIM)
-        for w in self.sub_bar.winfo_children():
-            w.destroy()
-        if group in _ATTR_GROUPS:                # armour: Str/Dex/Int, not base names
-            self.sub_label.config(text=f"Filter by attribute   ·   {group.upper()}"
-                                       f"   ·   multi-select, Str+Dex = has both")
-            self._build_attr_chips(group)
+        self._sel_wscope = None
+        self._sel_wtype = None
+        self._set_info_headers(g)                 # retitle c1/c2 for this group's kind
+        if g == "Weapons":
+            # the scope/type chips speak for themselves — no text label
+            self.nav.hide_sub_label()
+        elif g in _ATTR_GROUPS:                    # armour: Str/Dex/Int, not base names
+            self.nav.set_sub_label(f"Filter by attribute   ·   {g.upper()}"
+                                   f"   ·   multi-select, Str+Dex = has both")
             self._fill_items([])
             self._show_ph("← Str · Dex · Int  (можно несколько)     или  All")
-            return
-        if group == "Weapons":
-            self.sub_label.config(text="Choose hand   ·   ALL · 1H · 2H")
-            counts = self._weapon_chip_counts()
-            order, cnt_of = ["All", "1H", "2H"], counts.get
         else:
-            self.sub_label.config(text=f"Choose a base   ·   {group.upper()}")
-            subs = self._data.get(group, {})
-            total = sum(len(v) for v in subs.values())
-            order = ["All"] + [s for s, _ in sorted(
-                subs.items(), key=lambda kv: (-len(kv[1]), kv[0]))][:_MAX_SUBCHIPS]
-            cnt_of = lambda s: total if s == "All" else len(subs[s])
-        for i, s in enumerate(order):
-            chip = self._chip(self.sub_bar, f"{s}  {cnt_of(s) or 0}", False,
-                              lambda ss=s: self._select_sub(ss),
-                              eid=f"uniques.base[{s}]")
-            chip.grid(row=i // 12, column=i % 12, padx=2, pady=2, sticky="w")
-        # on request only: do NOT auto-fill — wait for a sub-chip click
-        self._fill_items([])
-        self._show_ph("← 1H / 2H / All" if group == "Weapons" else "← выбери базу")
+            self.nav.set_sub_label(f"Choose a base   ·   {g.upper()}")
+            self._fill_items([])
+            self._show_ph("← выбери базу")
 
-    def _select_sub(self, sub):
-        self._sel_sub = sub
-        for w in self.sub_bar.winfo_children():
-            on = w.cget("text").rsplit("  ", 1)[0] == sub
-            w._active = on
-            w.config(bg=DULL_GRN if on else BG3, fg=FG if on else FG_DIM)
-
-        if self._sel_group == "Weapons":
-            sections = self._weapon_sections(sub)
-            total = sum(len(it) for _, it in sections)
-            self.list_title.config(text=f"Weapons · {sub}")
-            self.list_sub.config(text=f"{total} uniques · {len(sections)} types · by level ↑")
-            self._fill_sectioned(sections)
+    def _on_leaf(self, leaf):
+        """A base chip picked (plain groups only — weapon/attr drive their own list):
+        fill the unique list for (group, base). leaf value = ("sub", group, base)."""
+        value = leaf.get("value")
+        if not value or value[0] != "sub":
             return
-        subs = self._data.get(self._sel_group, {})
+        _, group, sub = value
+        self._sel_sub = sub
+        subs = self._data.get(group, {})
         if sub == "All":
             items = [it for lst in subs.values() for it in lst]
             items.sort(key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
         else:
             items = subs.get(sub, [])
-        self.list_title.config(text=f"{self._sel_group} · {sub}")
+        self.list_title.config(text=f"{group} · {sub}")
         self.list_sub.config(text=f"{len(items)} uniques · by level ↑")
         self._fill_items(items)
 
-    def _weapon_chip_counts(self):
-        weapons = [it for lst in self._data.get("Weapons", {}).values() for it in lst]
-        return {"All": len(weapons),
-                "1H": sum(1 for it in weapons if it.get("hand") == "1H"),
-                "2H": sum(1 for it in weapons if it.get("hand") == "2H")}
+    # ---- leaf-bar hooks: the two data-coupled base bars (built into nav.sub_bar) --
+    def _weapon_hook(self, nav, parent, group):
+        """Weapons base bar: the two-row scope/type weapon picker. Opens on the 'All'
+        scope so the list shows at once (matches the old _select_group path)."""
+        self._sel_wscope = "All"
+        self._sel_wtype = None
+        self._build_weapon_chips()
+        self._show_weapons()
 
-    def _weapon_sections(self, which):
-        """-> [(label, [items])]. 'All' groups by full class; '1H'/'2H' filter by
-        hand and group by short type ('Mace'). Sorted by size, items by level."""
-        weapons = [it for lst in self._data.get("Weapons", {}).values() for it in lst]
-        if which in ("1H", "2H"):
-            weapons = [it for it in weapons if it.get("hand") == which]
-            keyf = lambda it: it.get("wtype") or "Other"
-        else:
-            keyf = lambda it: it.get("wclass") or "Other"
+    def _attr_hook(self, nav, parent, group):
+        """Armour base bar: the Str / Dex / Int (+ All) attribute toggles."""
+        self._sel_attrs = set()
+        self._attr_all = False
+        self._build_attr_chips(group["key"])
+
+    # ---- weapons: two-row base bar (scope row + archetype row) -----------------
+    # Row 1 is the scope: hand split (All/1H/2H) AND category split (Melee/Range/
+    # Caster), counted independently. Row 2 is the archetypes (Mace/Wand/Axe/…)
+    # PRESENT IN the chosen scope, so it narrows the weapons selected above. State:
+    # _sel_wscope (a row-1 chip) and _sel_wtype (a row-2 chip, None = the whole scope).
+    def _scope_weapons(self, scope):
+        """The weapons in *scope*: a hand filter (1H/2H), a category filter (Melee/
+        Range/Caster), or everything (All)."""
+        weapons = self._group_items("Weapons")
+        if scope in ("1H", "2H"):
+            return [it for it in weapons if it.get("hand") == scope]
+        if scope in ("Melee", "Range", "Caster"):
+            return [it for it in weapons
+                    if weapon_category(it.get("wtype") or "") == scope]
+        return weapons
+
+    def _wscope_counts(self):
+        weapons = self._group_items("Weapons")
+        out = {"All": len(weapons)}
+        for s in _WSCOPE_ORDER[1:]:
+            out[s] = len(self._scope_weapons(s))
+        return out
+
+    def _build_weapon_chips(self):
+        """Build the two weapon rows fresh: row 1 = the fixed scope chips, row 2 =
+        the archetypes within the current scope (rebuilt by _build_wtype_chips)."""
+        for w in self.sub_bar.winfo_children():
+            w.destroy()
+        self._wscope_row = tk.Frame(self.sub_bar, bg=BG2)
+        self._wscope_row.pack(fill="x", anchor="w")
+        self._wtype_row = tk.Frame(self.sub_bar, bg=BG2)
+        self._wtype_row.pack(fill="x", anchor="w", pady=(4, 0))
+        counts = self._wscope_counts()
+        for i, s in enumerate(_WSCOPE_ORDER):
+            chip = self._chip(self._wscope_row, f"{s}  {counts.get(s, 0)}",
+                              self._sel_wscope == s,
+                              lambda ss=s: self._select_wscope(ss),
+                              eid=f"uniques.base[{s}]")
+            chip.grid(row=0, column=i, padx=2, pady=2, sticky="w")
+        self._build_wtype_chips()
+
+    def _build_wtype_chips(self):
+        """Row 2: one archetype chip per short weapon type present in the current
+        scope, each with its count. No 'All' chip — the active scope chip in row 1
+        already IS "all of this scope"; clicking the live archetype again clears it."""
+        for w in self._wtype_row.winfo_children():
+            w.destroy()
+        weapons = self._scope_weapons(self._sel_wscope)
         buckets = {}
         for it in weapons:
-            buckets.setdefault(keyf(it), []).append(it)
-        out = []
-        for label in sorted(buckets, key=lambda k: (-len(buckets[k]), k)):
-            items = sorted(buckets[label],
-                           key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
-            out.append((label, items))
-        return out
+            buckets.setdefault(it.get("wtype") or "Other", []).append(it)
+        order = sorted(buckets, key=lambda k: (-len(buckets[k]), k))
+        for i, t in enumerate(order):
+            chip = self._chip(self._wtype_row, f"{t}  {len(buckets[t])}",
+                              self._sel_wtype == t,
+                              lambda tt=t: self._select_wtype(tt),
+                              eid=f"uniques.wtype[{t}]")
+            chip.grid(row=i // 12, column=i % 12, padx=2, pady=2, sticky="w")
+
+    def _select_wscope(self, scope):
+        """Row-1 pick: set the scope, reset the archetype filter, rebuild row 2."""
+        self._sel_wscope = scope
+        self._sel_wtype = None
+        for w in self._wscope_row.winfo_children():
+            on = w.cget("text").rsplit("  ", 1)[0] == scope
+            w._active = on
+            w.config(bg=DULL_GRN if on else BG3, fg=FG if on else FG_DIM)
+        self._build_wtype_chips()
+        self._show_weapons()
+
+    def _select_wtype(self, wtype):
+        """Row-2 pick: narrow the scope to one archetype; clicking the active chip
+        again clears it (back to the whole scope, the sectioned view)."""
+        self._sel_wtype = None if self._sel_wtype == wtype else wtype
+        for w in self._wtype_row.winfo_children():
+            on = w.cget("text").rsplit("  ", 1)[0] == self._sel_wtype
+            w._active = on
+            w.config(bg=DULL_GRN if on else BG3, fg=FG if on else FG_DIM)
+        self._show_weapons()
+
+    def _show_weapons(self):
+        """Render the weapon list for the current (scope, wtype): no archetype -> the
+        sectioned view grouped by archetype; an archetype -> that type's flat list."""
+        weapons = self._scope_weapons(self._sel_wscope)
+        scope = self._sel_wscope
+        if self._sel_wtype is None:
+            buckets = {}
+            for it in weapons:
+                buckets.setdefault(it.get("wtype") or "Other", []).append(it)
+            sections = []
+            for label in sorted(buckets, key=lambda k: (-len(buckets[k]), k)):
+                items = sorted(buckets[label],
+                               key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
+                sections.append((label, items))
+            total = sum(len(it) for _, it in sections)
+            self.list_title.config(text=f"Weapons · {scope}")
+            self.list_sub.config(
+                text=f"{total} uniques · {len(sections)} types · by level ↑")
+            self._fill_sectioned(sections)
+        else:
+            items = [it for it in weapons
+                     if (it.get("wtype") or "Other") == self._sel_wtype]
+            items.sort(key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
+            self.list_title.config(text=f"Weapons · {scope} · {self._sel_wtype}")
+            self.list_sub.config(text=f"{len(items)} uniques · by level ↑")
+            self._fill_items(items)
 
     # ------------------------------------------------------------- attribute filter
     def _group_items(self, group):
@@ -824,7 +957,7 @@ class UniquesPanel(tk.Frame):
         c1; weapons -> 'phys'/'ele' DPS; otherwise the plain 'mod' fallback."""
         if group in _ATTR_GROUPS:                 # armour: elemental resistances
             self.tv.heading("c1", text="res  (f c l)")
-            self.tv.column("c1", width=110, anchor="w", stretch=False)
+            self.tv.column("c1", width=160, anchor="w", stretch=False)
             self.tv.heading("c2", text="")
             self.tv.column("c2", width=0, stretch=False)
         elif group == "Weapons":
@@ -844,7 +977,7 @@ class UniquesPanel(tk.Frame):
         so an item shows the same two values whichever sub-filter surfaced it."""
         group = self._sel_group
         if group in _ATTR_GROUPS:
-            return resist_cells(it.get("explicits")), ""
+            return resist_segments(it.get("explicits")), ""
         if group == "Weapons":
             phys, ele = weapon_dps(it.get("props"))
             return ("" if phys is None else str(phys),
