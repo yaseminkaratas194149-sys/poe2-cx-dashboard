@@ -205,7 +205,9 @@ class EquipmentNav(tk.Frame):
 
     def select_group(self, group):
         """Second-row pick: highlight the group, then render its base bar — plain
-        leaf chips, or a host hook's custom bar (weapon / attribute)."""
+        leaf chips, or a host hook's custom bar (weapon / attribute).
+        A terminal node (value, no children, plain mode) fires directly without
+        opening a sub-bar — supports mixed group_row (e.g. Trade's 'Others')."""
         self.sel_group = group
         self.sel_leaf = None
         self._highlight(self.group_row, group["key"])
@@ -217,6 +219,9 @@ class EquipmentNav(tk.Frame):
             hook = self._hooks.get(mode)
             if hook:
                 hook(self, self.sub_bar, group)
+            return
+        if not group.get("children") and "value" in group:
+            self._fire_leaf(group)
             return
         self._render_leaves(group.get("children") or [])
 
@@ -254,7 +259,12 @@ class EquipmentNav(tk.Frame):
                             self._fire_leaf(lf)
                             return True
                 elif child.get("value") == value:
-                    self.select_meta(m)        # renders the leaf chips
-                    self._fire_leaf(child)     # then highlights + fires the pick
+                    self.select_meta(m)
+                    children_list = m.get("children") or []
+                    if children_list and is_group(children_list[0]):
+                        # terminal chip lives in group_row; select_group highlights + fires
+                        self.select_group(child)
+                    else:
+                        self._fire_leaf(child)
                     return True
         return False

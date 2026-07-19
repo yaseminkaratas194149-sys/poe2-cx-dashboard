@@ -400,6 +400,24 @@ _CAT_META_LABEL = {
     "gem": "Gem", "jewel": "Jewel", "flask": "Flask", "map": "Endgame",
     "card": "Cards", "sanctum": "Sanctum", "currency": "Currency",
 }
+# Rarely-used metas folded into an "Others" chip. Ordered so the group (currency)
+# comes first — EquipmentNav checks children[0] to decide group_row vs leaf bar.
+_OTHERS_META_KEYS = {"card", "sanctum", "currency"}
+_OTHERS_META_ORDER = ["currency", "card", "sanctum"]
+
+# Weapon sub-groups for the 3-tier taxonomy: (group_id, chip_label, [member_ids]).
+# The group_id is prepended as the "Any <group>" leaf inside each group's sub-bar.
+_WEAPON_GROUPS = [
+    ("weapon.onemelee", "1H Melee",
+     ["weapon.unarmed", "weapon.claw", "weapon.dagger",
+      "weapon.onesword", "weapon.oneaxe", "weapon.onemace", "weapon.spear", "weapon.flail"]),
+    ("weapon.twomelee", "2H Melee",
+     ["weapon.twosword", "weapon.twoaxe", "weapon.twomace",
+      "weapon.warstaff", "weapon.talisman"]),
+    ("weapon.ranged",   "Ranged",   ["weapon.bow", "weapon.crossbow"]),
+    ("weapon.caster",   "Caster",
+     ["weapon.wand", "weapon.sceptre", "weapon.staff", "weapon.rod"]),
+]
 
 
 def category_taxonomy():
@@ -408,8 +426,8 @@ def category_taxonomy():
     meta whose leaves are its dotted members plus the bare 'Any <meta>' id; a meta
     with a single id (Jewel, Cards) collapses to a terminal meta chip; the lone
     ('', 'Any') entry is a standalone 'Any' meta that clears the category filter.
-    Pure restructuring of CATEGORIES — the same option ids come back out as leaf
-    ``value``s, so the picked value drops straight into a preset's ``category``."""
+    Rarely-used metas (currency/card/sanctum) are folded under a shared 'Others'
+    chip to keep the meta row compact — same option ids come out as leaf ``value``s."""
     order, buckets = [], {}
     for cid, label in CATEGORIES:
         meta = cid.split(".", 1)[0] if cid else ""
@@ -417,21 +435,26 @@ def category_taxonomy():
             buckets[meta] = []
             order.append(meta)
         buckets[meta].append((cid, label))
-    metas = []
+    main_metas, others_by_key = [], {}
     for meta in order:
         entries = buckets[meta]
         if meta == "":                       # the lone ("", "Any") -> clear filter
-            metas.append({"key": "any", "label": "Any", "value": ""})
+            main_metas.append({"key": "any", "label": "Any", "value": ""})
             continue
         leaves = [{"key": cid or meta, "label": label, "value": cid}
                   for cid, label in entries]
         meta_label = _CAT_META_LABEL.get(meta, meta.title())
-        if len(leaves) == 1:                 # single id (Jewel, Cards) -> terminal
-            metas.append({"key": meta, "label": meta_label,
-                          "value": leaves[0]["value"]})
+        node = ({"key": meta, "label": meta_label, "value": leaves[0]["value"]}
+                if len(leaves) == 1 else
+                {"key": meta, "label": meta_label, "children": leaves})
+        if meta in _OTHERS_META_KEYS:
+            others_by_key[meta] = node
         else:
-            metas.append({"key": meta, "label": meta_label, "children": leaves})
-    return metas
+            main_metas.append(node)
+    others_children = [others_by_key[k] for k in _OTHERS_META_ORDER if k in others_by_key]
+    if others_children:
+        main_metas.append({"key": "others", "label": "Others", "children": others_children})
+    return main_metas
 
 # Embedded fallback for the stat picker: the full pseudo group. The complete
 # dictionary (explicit ~600 ids etc.) comes from stat_options() at runtime.
