@@ -1,16 +1,20 @@
 """cx pipeline stages + build helper (mirrors DATA/pipeline/stages/__init__.py)."""
 from cx.stages.provision import EnsureSchemaStage
-from cx.stages.api_stages import PairsStage
+from cx.stages.api_stages import PairsStage, BackfillStage, UniquesStage, TradeDictStage
 
 
-def build_stages():
-    return [
-        EnsureSchemaStage(),
-        PairsStage(),
-    ]
+def build_stages(full: bool = False):
+    """The hourly cycle (provision -> pairs), or with `full` the Actualize DAG:
+    the same two plus backfill (after pairs), uniques (after provision) and the
+    trade dictionary (independent) -- the runner overlaps what it can."""
+    stages = [EnsureSchemaStage(), PairsStage()]
+    if full:
+        stages += [BackfillStage(), UniquesStage(), TradeDictStage()]
+    return stages
 
 
-# UI grid layout (one row for now)
+# UI grid layout
 STAGE_LAYOUT = [
-    ["cx00_provision", "cx10_pairs"],
+    ["cx00_provision", "cx10_pairs", "cx11_backfill"],
+    ["cx20_uniques", "cx30_trade_dict"],
 ]

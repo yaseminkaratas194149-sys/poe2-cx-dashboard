@@ -9,16 +9,27 @@ from pathlib import Path
 from DATA.config import DB_CONFIG  # shared Postgres (cx uses its own schemas)
 
 REALM = "poe2"
-# League to track. None -> the API's default (first IsCurrent, i.e. softcore).
-# Set to a ShortName to pin one league: we trade only in HC Runes of Aldur, whose
-# ShortName is 'runeshc' (-> schema cx_runeshc). Both 'runes' and 'runeshc' carry
-# IsCurrent, so without this pin the resolver would pick softcore 'runes'.
-LEAGUE_SHORT = "runeshc"
-# poe2scout tracks UNIQUES only for softcore leagues (HC unique categories are
-# empty). A unique's name/base/mods/icon are league-invariant, so the unique
-# reference is pulled from the softcore counterpart and stored in the active
-# schema. Update alongside LEAGUE_SHORT when the league rotates.
-UNIQUES_LEAGUE_SHORT = "runes"
+# League to track. None (default) -> resolved from poe2scout on every cycle:
+# the first IsCurrent entry of /Leagues is the newest softcore league (several
+# leagues carry IsCurrent at once -- poe2scout keeps the previous one current
+# for a while -- but the newest is listed first), and with HARDCORE the tracked
+# league is its HC twin (ShortName + 'hc': forbiddenrites -> forbiddenriteshc,
+# schema cx_forbiddenriteshc). Set a ShortName to pin one league by hand; the
+# pin wins over the rule. History: pinned 'runeshc' 2026-06; on 2026-09-05 that
+# stale pin had left the store three months behind, hence the rule.
+LEAGUE_SHORT = None
+HARDCORE = True
+# Unique-item reference source(s). poe2scout tracks uniques mostly for softcore
+# leagues (HC lists are empty) and a new league's list can stay empty for days
+# after launch (2026-09-05: 'forbiddenrites' had 0 unique categories, 'runes'
+# 449). A unique's identity is league-invariant and its UniqueItemId is the same
+# in every league, so the reference is MERGED: the most complete populated list
+# first, then the tracked league's softcore twin on top (current prices, mod
+# text) -- see source.uniques_sources. None -> that rule; a ShortName pins one
+# source by hand.
+UNIQUES_LEAGUE_SHORT = None
+# Hours of per-pair history the Actualize cycle backfills (stage cx11_backfill).
+BACKFILL_HOURS = 48
 POE2SCOUT_BASE = "https://api.poe2scout.com"
 # poe2scout asks callers to identify themselves. Public code carries only the
 # repo URL (identifiable, no personal data); set POE2CX_CONTACT in the environment

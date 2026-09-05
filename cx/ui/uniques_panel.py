@@ -20,7 +20,11 @@ one data-driven renderer for every class — the class marker is the null-valued
 explicit mods / flavour. Everything it needs is kept on the item dict at index
 time, so the click needs no extra query.
 
-Data: cx_<league>.unique_item (pulled by `python -m cx.uniques`). The
+Data: cx_<league>.unique_item (the Actualize cycle / `python -m cx.uniques`), read
+from the league schema with the freshest pairs (derive.resolve_schema). A row
+click pops the detail card; a DOUBLE click (and the card's "↗ Open trade2"
+button) opens a trade2 tab for that unique in the tracked league, through the
+same browser hand-off the Trade view uses (trade.unique_preset -> #cxq). The
 category/base taxonomy is DERIVED from poe2scout's coarse category + the base
 type via the heuristic classify() below — poe2scout's unique data has only 7
 coarse categories, so the screenshot-style split (Body Armours / Helmets / Bow /
@@ -29,12 +33,13 @@ Staff …) is reconstructed from base-type keywords. Tune the tables freely.
 import queue
 import re
 import threading
+import traceback
 import tkinter as tk
 from tkinter import ttk
 
 import psycopg2
 
-from cx import config
+from cx import config, derive, trade
 from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, BORDER, DULL_GRN, RED,
                     HOVER_BG)
 from .icons import IconCache
@@ -468,7 +473,8 @@ class UniquesPanel(tk.Frame):
         super().__init__(parent, bg=BG)
         self.tm = tm
         self.icons = IconCache()
-        self._schema = config.schema_name(config.LEAGUE_SHORT)
+        self._schema = None          # the league schema, resolved from the store on refresh
+        self._league = None          # its display name, for the trade2 URL
         self._data = {}              # group -> {subgroup -> [item dict]}
         self._icon_urls = {}         # icon key -> url
         self._sel_meta = None        # chosen top-tier meta-category (Weapon/Armour/…)
@@ -581,6 +587,10 @@ class UniquesPanel(tk.Frame):
         self.tv.bind("<Motion>", self._hover_motion)
         self.tv.bind("<Leave>", lambda e: self._hover_restore(self.tv))
         self.tv.bind("<Button-1>", self._on_row_click, add="+")   # row -> detail card
+        # A double click opens trade2 for that unique. Tk fires the more specific
+        # <Double-Button-1> INSTEAD of <Button-1> for the second press, so the
+        # card from the first press is all that opens — this closes it again.
+        self.tv.bind("<Double-Button-1>", self._on_row_double, add="+")
         # (Ctrl+click stays the inspector capture: it fires <Control-Button-1>, the
         #  more specific binding, so this plain handler does not run for it.)
         self.ph = tk.Label(bodyf, text="", bg=BG3, fg=FG_MUTED,
@@ -593,6 +603,10 @@ class UniquesPanel(tk.Frame):
             conn = self._conn()
             cur = conn.cursor()
             try:
+                self._schema = derive.resolve_schema(cur)   # the league with the freshest pairs
+                cur.execute(f"select league from {self._schema}.league limit 1")
+                row = cur.fetchone()
+                self._league = row[0] if row else None       # for the trade2 URL
                 cur.execute(
                     f"""select unique_item_id, name, base_type, category_api_id,
                                icon_url, (requirements->>'Level') as lvl,
@@ -659,7 +673,7 @@ class UniquesPanel(tk.Frame):
         self.nav.set_taxonomy(metas)
         self._fill_items([])
         if not metas:
-            self._show_ph(f"no uniques in {self._schema}\nrun  python -m cx.uniques")
+            self._show_ph(f"no uniques in {self._schema or 'the store'}\nrun  ⇊ Actualize")
         else:
             self._show_ph("выбери категорию ↑")
 
@@ -1040,6 +1054,30 @@ class UniquesPanel(tk.Frame):
         if it is not None:
             self._show_card(it, ev)
 
+    def _on_row_double(self, ev):
+        """Double click on an item row -> a trade2 tab for that unique."""
+        it = self._row_item.get(self.tv.identify_row(ev.y))
+        if it is not None:
+            self._close_card()              # the first click of the pair opened it
+            self._open_trade(it)
+
+    def _open_trade(self, it):
+        """Open trade2 for one unique, off the UI thread.
+
+        The league display name is read from the store on refresh; without it
+        (an empty store) `open_preset` resolves it from poe2scout itself, which
+        is exactly why this runs in a thread — that is a network call, and so is
+        the browser hand-off."""
+        name, league = it.get("name"), self._league
+
+        def work():
+            try:
+                trade.open_preset(trade.unique_preset(name), league)
+            except Exception:
+                traceback.print_exc()       # surfaces in the terminal log
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _close_card(self):
         if self._card is not None:
             self._dismiss(self._card)
@@ -1132,6 +1170,19 @@ class UniquesPanel(tk.Frame):
             fg, font, wrap = spec[style]
             tk.Label(pad, text=text, bg=BG2, fg=fg, font=font, wraplength=wrap or 0,
                      justify="center", anchor="center").pack(fill="x")
+        # …and the one action the card offers: this unique on trade2 (the same
+        # hand-off the row's double click uses). The card dismisses itself on any
+        # click — a child's own binding runs before the toplevel's, so the tab is
+        # opened first and the card closing after is the wanted feedback.
+        tk.Frame(pad, bg=BORDER, height=1).pack(fill="x", pady=5)
+        btn = tk.Label(pad, text="↗ Open trade2", bg=BG3, fg=FG,
+                       font=("Segoe UI", 9), cursor="hand2", pady=3)
+        btn.pack(fill="x")
+        btn.bind("<Button-1>", lambda e, i=it: self._open_trade(i))
+        btn.bind("<Enter>", lambda e: btn.config(bg=HOVER_BG))
+        btn.bind("<Leave>", lambda e: btn.config(bg=BG3))
+        if self.tm is not None:
+            self.tm.tag(btn, "uniques.card.trade")
 
     # ------------------------------------------------------------------ hover
     def _hover_motion(self, ev):

@@ -18,6 +18,22 @@ def _int(x):
     return int(x) if x is not None else None
 
 
+def _mod_lines(mods):
+    """Mod array -> text[] lines (None when empty).
+
+    poe2scout emits two shapes: plain strings, and -- seen 2026-09-05 on newer
+    items (e.g. The Dancing Dervish) -- structured dicts {description, hash,
+    mods:[{magnitudes:[{min,max}]}]}. The text[] column keeps the line; the
+    structured form survives whole in `metadata` jsonb."""
+    out = []
+    for m in mods or []:
+        if isinstance(m, dict):
+            m = m.get("description") or ""
+        if m:
+            out.append(str(m))
+    return out or None
+
+
 def upsert_currencies(cur, schema: str, pairs: list) -> int:
     """UPSERT cx_currency from the currencies embedded in SnapshotPairs rows."""
     seen = {}
@@ -99,7 +115,7 @@ def upsert_uniques(cur, schema: str, items: list) -> int:
             it["UniqueItemId"], _int(it.get("ItemId")), it.get("Name"),
             m.get("base_type") or it.get("Type"), it.get("CategoryApiId"),
             it.get("IconUrl"), _int(m.get("item_level")),
-            m.get("implicit_mods") or None, m.get("explicit_mods") or None,
+            _mod_lines(m.get("implicit_mods")), _mod_lines(m.get("explicit_mods")),
             m.get("flavor_text"),
             Json(m["requirements"]) if m.get("requirements") is not None else None,
             _num(it.get("CurrentPrice")),

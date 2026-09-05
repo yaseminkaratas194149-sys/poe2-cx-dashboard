@@ -34,6 +34,8 @@ def build_search_query(preset: dict) -> dict:
     Pre-fields (all optional):
       status    : "available" (default) | "securable" | "onlineleague" |
                   "online" | "any"   (see STATUS_LABELS for the trade2 names)
+      name      : str, an item's exact name ("Temporalis") -> query.name
+      type      : str, a base type ("Silk Robe")           -> query.type
       stats     : list of {"id": <stat id>, "min": .., "max": ..}  (min/max optional;
                   omit both -> "mod present, any roll")
       category  : str, e.g. "armour.helmet"            -> filters.type_filters.category
@@ -42,7 +44,13 @@ def build_search_query(preset: dict) -> dict:
       price     : {"option": "chaos", "max": 15} etc.  -> filters.trade_filters.price
       sort      : dict, default {"price": "asc"}
     """
-    q = {"status": {"option": preset.get("status", "available")}}
+    q = {"status": {"option": preset.get("status", STATUS_DEFAULT)}}
+    # name / type are the official item-dictionary fields (api/trade2/data/items):
+    # the site sends both when you pick an item from its autocomplete. Order in
+    # the body is irrelevant; the site puts them right after status.
+    for k in ("name", "type"):
+        if preset.get(k):
+            q[k] = preset[k]
 
     # the site always sends a stats group, even empty — mirror it exactly
     group = []
@@ -210,6 +218,9 @@ def _query_to_preset(q: dict, sort: dict = None) -> dict:
     status = (q.get("status") or {}).get("option")
     if status:
         p["status"] = status
+    for k in ("name", "type"):
+        if isinstance(q.get(k), str) and q[k]:
+            p[k] = q[k]
     stats = []
     for grp in q.get("stats") or []:
         for f in grp.get("filters") or []:
@@ -305,6 +316,22 @@ def preset_to_url(preset: dict, league: str) -> str:
     return f"{TRADE2_SEARCH}/{urllib.parse.quote(league)}#cxq={frag}"
 
 
+def unique_preset(name: str) -> dict:
+    """The minimal preset for "show me this unique on trade2": its name, nothing
+    else — default status, default sort (cheapest first), no stat / category /
+    price filters.
+
+    Name ONLY, deliberately, though the site pairs name with the base type: the
+    names cx stores come from poe2scout and all 449 of them match the official
+    dictionary exactly, while 10 base types do not (poe2scout's "Delirium
+    Precursor Tablet" vs the official "Delirium Tablet") — and a base that the
+    dictionary does not know turns the search into zero results. A unique's name
+    identifies it on its own; where a name covers several bases (the
+    "Runemastered" variants), listings for all of them are wanted anyway.
+    """
+    return {"name": name}
+
+
 def open_preset(preset: dict, league: str = None) -> str:
     """Open one preset as a new browser tab; returns the URL opened."""
     if league is None:
@@ -372,6 +399,8 @@ PRICE_OPTIONS = ["exalted", "divine", "chaos", "annul", "regal", "alch"]
 #   a filtered stat      -> {"stat.<id>":  "desc"}      e.g. {"stat.pseudo.pseudo_total_cold_resistance":"desc"}
 #   price (site default) -> {"price": "asc"}
 SORT_DEFAULT = {"price": "asc"}
+# trade2's own first status option, and cx's default for a query that sets none.
+STATUS_DEFAULT = "available"
 # (label, sort) for the fixed item-property columns the dropdown always offers.
 SORT_PROPERTIES = [
     ("Price (cheapest first)", {"price": "asc"}),
@@ -512,26 +541,42 @@ def _flatten_stats(raw) -> list:
     return out
 
 
+def _cached_stats() -> list:
+    """The disk-cached dictionary, flattened; [] when absent / unreadable."""
+    try:
+        return _flatten_stats(json.loads(DICT_CACHE.read_text("utf-8")))
+    except Exception:
+        return []
+
+
+def refresh_stats() -> tuple:
+    """Re-fetch the open data/stats dictionary and rewrite the disk cache.
+
+    -> (entries cached before, the fresh flat list). Raises when the fetch fails
+    or comes back empty -- the `cx30_trade_dict` stage wants the error, unlike
+    `stat_options`, which falls back silently for the picker."""
+    before = len(_cached_stats())
+    req = urllib.request.Request(
+        DATA_STATS_URL, headers={"User-Agent": _BROWSER_UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = json.loads(resp.read().decode("utf-8"))
+    flat = _flatten_stats(raw)
+    if not flat:
+        raise RuntimeError("data/stats came back empty")
+    DICT_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    DICT_CACHE.write_text(json.dumps(raw), encoding="utf-8")
+    return before, flat
+
+
 def stat_options(refresh: bool = False) -> list:
     """[(id, text)] for the stat picker: full open dictionary when reachable
     (disk-cached across runs), embedded pseudo set as the offline fallback."""
     if not refresh:
-        try:
-            flat = _flatten_stats(json.loads(DICT_CACHE.read_text("utf-8")))
-            if flat:
-                return flat
-        except Exception:
-            pass
-    try:
-        req = urllib.request.Request(
-            DATA_STATS_URL, headers={"User-Agent": _BROWSER_UA, "Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = json.loads(resp.read().decode("utf-8"))
-        flat = _flatten_stats(raw)
+        flat = _cached_stats()
         if flat:
-            DICT_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            DICT_CACHE.write_text(json.dumps(raw), encoding="utf-8")
             return flat
+    try:
+        return refresh_stats()[1]
     except Exception:
         pass
     return [(i, f"[pseudo] {t}") for i, t in PSEUDO_STATS]

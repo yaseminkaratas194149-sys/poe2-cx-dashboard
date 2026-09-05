@@ -1,22 +1,20 @@
-"""Pull the unique-item reference from poe2scout into cx_<league>.unique_item.
+"""Unique-item reference: poe2scout Uniques -> cx_<league>.unique_item.
 
-poe2scout tracks uniques only for SOFTCORE leagues (HC unique categories are
-empty), but a unique's name / base / mods / icon are league-invariant — so we
-pull from the softcore counterpart (config.UNIQUES_LEAGUE_SHORT) and store it as
-reference in the active schema. On-demand CLI (like cx.backfill), not a per-cycle
-DAG stage: uniques change per patch, not per hour.
+poe2scout tracks uniques mostly for softcore leagues (the HC lists are empty),
+and a new league's list can stay empty for days after launch -- while a
+unique's name / base / mods / icon are league-invariant and its UniqueItemId
+is the same in every league. So the reference is MERGED into the tracked
+league's schema: the most complete populated list first, then the tracked
+league's softcore twin on top for current prices / mod text
+(`source.uniques_sources` picks the order). Uniques change per patch, not per
+hour, so this is not part of the hourly cycle: it is the `cx20_uniques` stage
+of the Actualize cycle, and an on-demand CLI:
 
-  python -m cx.uniques            pull all unique categories -> cx_<league>.unique_item
+  python -m cx.uniques        resolve the league + sources, pull, UPSERT
 """
 import psycopg2
 
 from cx import config, source, store
-
-
-def ensure_schema(cur, schema: str):
-    """Create the active schema + tables if missing (idempotent; same DDL as provisioning)."""
-    ddl = config.SCHEMA_SQL.read_text(encoding="utf-8").replace("{schema}", schema)
-    cur.execute(ddl)
 
 
 def pull_all(src_league: str):
@@ -39,24 +37,37 @@ def pull_all(src_league: str):
     return items, per_cat
 
 
+def refresh(cur, schema: str, sources: list, log=print) -> dict:
+    """Pull each source league in order and UPSERT into `schema`.unique_item.
+
+    A later source overwrites an earlier one row by row (same UniqueItemId),
+    which is the point of the order. The caller owns the transaction.
+    -> {count: distinct items seen, per_source: {short: rows upserted}}."""
+    seen, per = set(), {}
+    for src in sources:
+        items, per_cat = pull_all(src)
+        per[src] = store.upsert_uniques(cur, schema, items)
+        seen.update(it["UniqueItemId"] for it in items)
+        log(f"{src}: {len(items)} uniques {per_cat}")
+    return {"count": len(seen), "per_source": per}
+
+
 def main():
-    src = config.UNIQUES_LEAGUE_SHORT
-    schema = config.schema_name(config.LEAGUE_SHORT)
-    print(f"uniques: source league '{src}' -> schema {schema}")
-
-    items, per_cat = pull_all(src)
-    print(f"  pulled {len(items)} uniques  {per_cat}")
-
+    from cx.stages.provision import EnsureSchemaStage   # lazy: cx.stages imports this module
+    prov = EnsureSchemaStage().run({})                  # tracked league + schema, idempotent
+    schema, short = prov["schema"], prov["short_name"]
+    print(f"uniques: {prov['league']} -> {schema}")
+    sources = source.uniques_sources(short, log=lambda m: print("  probe", m))
+    print(f"  sources: {' + '.join(sources)}")
     conn = psycopg2.connect(**config.DB_CONFIG)
-    conn.autocommit = True
     try:
         cur = conn.cursor()
-        ensure_schema(cur, schema)          # idempotent
-        n = store.upsert_uniques(cur, schema, items)
+        res = refresh(cur, schema, sources, log=lambda m: print("  " + m))
+        conn.commit()
         cur.close()
     finally:
         conn.close()
-    print(f"  upserted {n} uniques into {schema}.unique_item")
+    print(f"  {res['count']} distinct uniques -> {schema}.unique_item")
 
 
 if __name__ == "__main__":

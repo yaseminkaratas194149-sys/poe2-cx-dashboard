@@ -20,7 +20,7 @@ from tkinter import ttk
 
 import psycopg2
 
-from cx import config, trade
+from cx import config, derive, trade
 from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, BORDER_DARK,
                     DULL_GRN, RED)
 from .chrome import seg_cell, bind_seg_hover
@@ -72,8 +72,8 @@ class TradePanel(tk.Frame):
         full stat dictionary (disk cache / network / embedded) off the UI thread."""
         league = None
         try:
-            schema = config.schema_name(config.LEAGUE_SHORT)
             with self._conn() as conn, conn.cursor() as cur:
+                schema = derive.resolve_schema(cur)      # the league with the freshest pairs
                 cur.execute(f"select league from {schema}.league limit 1")
                 row = cur.fetchone()
                 league = row[0] if row else None
@@ -105,6 +105,10 @@ class TradePanel(tk.Frame):
         except queue.Empty:
             pass
         self.after(400, self._poll)
+
+    def refresh(self):
+        """Re-resolve the league name + stat dictionary (after an Actualize cycle)."""
+        threading.Thread(target=self._bg_init, daemon=True).start()
 
     # ------------------------------------------------------------------ build
     def _card(self, title, parent=None):

@@ -1,14 +1,18 @@
 """Frameless-window chrome for the cx app.
 
 Small, dependency-light ports of the launcher / doc_nav idioms — segmented
-action cells, single-instance mutex, relaunch interpreter, and a bottom-right
-resize grip (a frameless window has no native resize border). `launcher.app`
-itself can't be imported (it drags in process_runner / hotkeys / persistence),
-so the ~40 lines we actually want live here.
+action cells, the pin glyph, single-instance mutex, relaunch interpreter, and a
+bottom-right resize grip (a frameless window has no native resize border).
+`launcher.app` itself can't be imported (it drags in process_runner / hotkeys /
+persistence), and `launcher.git_panel`, where the pin is drawn, drags in
+persistence / shortcuts of its own — so the ~40 lines we actually want live
+here. cx also ships as a standalone public package, where `launcher` is not on
+the path at all; only `progress_ring` is imported from it, behind a fallback.
 """
 
 import ctypes
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -18,6 +22,7 @@ from .theme import BG, BG2, BORDER, FG, FG_MUTED, HOVER_BG
 CELL_H = 22
 CELL_W_GLYPH = 24
 CELL_W_RUN = 84
+PIN_SIZE = 22          # the pin glyph's canvas (draw_pin's coordinates assume it)
 
 
 def seg_cell(parent, text, *, width=CELL_W_GLYPH, primary=False, first=False,
@@ -42,6 +47,21 @@ def seg_cell(parent, text, *, width=CELL_W_GLYPH, primary=False, first=False,
     lbl._hover_bg = BORDER if primary else HOVER_BG
     lbl._active = False
     return outer, lbl
+
+
+def draw_pin(canvas, fill_color, outline_color):
+    """Render a small pushpin on the canvas (deletes any prior items).
+
+    Bead head (stable 1px outline + interior fill) plus a hairline diagonal
+    needle. `fill_color` toggles with state (bright when pinned, BG when not);
+    `outline_color` stays stable so the silhouette is always readable. Same
+    geometry as the launcher's, so the two toolbars read identically — it wants
+    a canvas about PIN_SIZE square.
+    """
+    canvas.delete("all")
+    canvas.create_line(10, 10, 20, 20, fill=outline_color, width=1)
+    canvas.create_oval(3, 3, 11, 11, fill="", outline=outline_color, width=1)
+    canvas.create_oval(4, 4, 10, 10, fill=fill_color, outline="")
 
 
 def bind_seg_hover(lbl):
@@ -93,6 +113,24 @@ def try_single_instance(name):
         return False
     _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, name)
     return True
+
+
+def signal_summon(name, hold_seconds=1.2):
+    """Hold a named mutex for a moment — the running instance's summon poll sees
+    it and raises its window.
+
+    The whole IPC: a second `python -m cx` cannot open a window (single
+    instance), so instead of exiting silently it raises this flag and leaves.
+    Held longer than the poll interval, so it cannot be missed; a crash before
+    the release drops the mutex with the process, so nothing goes stale.
+    """
+    h = ctypes.windll.kernel32.CreateMutexW(None, False, name)
+    time.sleep(hold_seconds)
+    if h:
+        try:
+            ctypes.windll.kernel32.CloseHandle(h)
+        except Exception:
+            pass
 
 
 def release_instance():
