@@ -1,12 +1,15 @@
 """CxPanel — liquidity board + currency lookup, in the launcher / doc_nav
 visual language.
 
-Two bordered cards (board + currency view) over the cx store. Read-only:
+Two bordered cards (board + currency view) over the cx store, plus the pair
+chart card a click on a counter row opens (pair_chart.PairChart). Read-only:
 queries go through cx.derive. The currency name rides in each tree's #0 column
 with its icon; rows stripe and highlight on hover; icons stream in from a disk
 cache in the background. Empty / no-schema states render a friendly placeholder,
 not a red error. Widgets are tagged through the universal ticket+inspector handle
-(`tm`) when present, so any element greps back to this source.
+(`tm`) when present, so any element greps back to this source. A click on a
+column header sorts that card by the column — high → low, click again for
+low → high (ColumnSort); the pinned key-pair row stays on top.
 """
 import queue
 import threading
@@ -21,7 +24,9 @@ from cx import config, derive
 from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, BORDER, GREEN, RED,
                     HOVER_BG)
 from .chrome import seg_cell, bind_seg_hover
+from .colsort import ColumnSort
 from .icons import IconCache
+from .pair_chart import PairChart
 
 # Subtle row striping (over the BG3 field): alternate rows a hair darker.
 STRIPE_A = BG3          # "#2d2d2d"
@@ -32,6 +37,7 @@ STRIPE_B = "#272728"
 # the latest hour carries no divine leg for that currency.
 KEY_COUNTER = "divine"
 KEY_BG = "#37373d"      # pinned-row tint (same as the uniques section rows)
+PINNED_TAGS = {"key", "missing"}   # the rows a header sort leaves on top
 
 PLACEHOLDER = "currency…"
 ICON_SIZE = 20          # per-row currency icon (px)
@@ -51,6 +57,9 @@ class CxPanel(tk.Frame):
         self._icon_q = queue.Queue()  # (kind, ...) results from loader threads
         self._icon_active = 0         # running loaders (main-thread counter)
         self._icon_poll = None        # after-job id of the drain poller
+        self._chart = None            # the open pair-chart card, or None
+        self._cur_api = None          # currency the currency view shows
+        self._short = None            # league short name (poe2scout path segment)
         self._build()
         self._tag_widgets()
         self.refresh()
@@ -79,10 +88,11 @@ class CxPanel(tk.Frame):
         # right card — currency view (counter name + icon in #0; header icon)
         (_r, self.cur_icon, self.cur_title, self.cur_sub, self.cur_tv, self.cur_ph) = self._make_card(
             body, "left", "Currency",
-            ("counter", 158), [("rate", 78), ("per 1 X", 78), ("vol(X)", 58), ("val", 84)],
+            ("counter", 158), [("price", 78), ("avg 6h", 78), ("7d", 56), ("traded", 84)],
             pad=(4, 0), with_icon=True)
         self.cur_sub.config(text="")
         self._show_placeholder(self.cur_ph, "double-click a currency\nor type one and press Enter")
+        self.cur_tv.bind("<Button-1>", self._on_cur_click, add="+")   # counter row -> pair chart
 
     def _build_search_row(self):
         top = tk.Frame(self, bg=BG)
@@ -127,7 +137,8 @@ class CxPanel(tk.Frame):
         """A bordered card: hairline frame → BG2 body → BG3 header strip +
         Treeview + centered placeholder. The currency name + icon ride in the #0
         tree column (`tree_col` = (heading, width)); `cols` are the numeric data
-        columns. `with_icon` adds a header icon Label left of the title.
+        columns. `with_icon` adds a header icon Label left of the title. A click
+        on a column header sorts the card by it (see _sort_click).
         Returns (inner, head_icon, title_lbl, sub_lbl, tree, placeholder)."""
         outer = tk.Frame(parent, bg=BORDER)
         outer.pack(side=side, fill="both", expand=True, padx=pad)
@@ -159,6 +170,14 @@ class CxPanel(tk.Frame):
         for c, w in cols:
             tv.heading(c, text=c)
             tv.column(c, width=w, anchor="e", stretch=False)
+        # header click -> sort by that column: ColumnSort keeps (col, direction),
+        # _fill stores each row's raw keys, _apply_sort moves the rows in place
+        tv._colids = ["#0"] + [c for c, _ in cols]
+        tv._titles = dict(zip(tv._colids, [tcol_name] + [c for c, _ in cols]))
+        tv._sort = ColumnSort()
+        tv._keys = {}
+        for c in tv._colids:
+            tv.heading(c, command=lambda c=c, tv=tv: self._sort_click(tv, c))
         sb = ttk.Scrollbar(bodyf, orient="vertical", command=tv.yview,
                            style="Subtle.Vertical.TScrollbar")
         tv.configure(yscrollcommand=sb.set)
@@ -244,19 +263,58 @@ class CxPanel(tk.Frame):
     def _hide_placeholder(ph):
         ph.place_forget()
 
-    def _fill(self, tv, rows):
+    def _fill(self, tv, rows, keys=None):
         """Fill a tree. rows: (api_id, name_text, (col values...)[, tags]). The
         name goes in #0 (with the icon, loaded later); a row without its own
-        tags gets the stripe. Returns [(rowid, api_id)]."""
+        tags gets the stripe. `keys`, aligned with rows, are each row's raw sort
+        values -- (name, col1, col2, ...) as numbers, not cell text -- kept for
+        the header sort; None for a row that never sorts (the pinned stub). The
+        card's active sort, if any, is re-applied. Returns [(rowid, api_id)]."""
         self._hover_restore(tv)
         tv.delete(*tv.get_children())
+        tv._keys = {}
         ids = []
         for i, row in enumerate(rows):
             api, text, vals = row[:3]
             tags = row[3] if len(row) > 3 else ("even" if i % 2 == 0 else "odd",)
             rid = tv.insert("", "end", text=text, values=vals, tags=tags)
             ids.append((rid, api))
+            if keys is not None and keys[i] is not None:
+                tv._keys[rid] = keys[i]
+        self._apply_sort(tv)
         return ids
+
+    # ------------------------------------------------------------------
+    # header sort (click: high -> low, again: low -> high; #0 opens A -> Z)
+    # ------------------------------------------------------------------
+
+    def _sort_click(self, tv, col):
+        tv._sort.click(col)
+        self._apply_sort(tv)
+
+    def _apply_sort(self, tv):
+        """Reorder *tv* in place by its ColumnSort: rows move (icons ride along),
+        the pinned key-pair rows stay on top, the stripe is redone in the new
+        order, and the active header carries the arrow. With no active column
+        the fill order stands (only the stripe and titles are touched)."""
+        srt = tv._sort
+        self._hover_restore(tv)
+        rows = tv.get_children("")
+        def tags(r):                        # Tk hands back a tuple, or a bare str
+            t = tv.item(r, "tags")
+            return {t} if isinstance(t, str) else set(t)
+        pinned = [r for r in rows if PINNED_TAGS & tags(r)]
+        rest = [r for r in rows if r not in pinned]
+        if srt.col is not None:
+            idx = tv._colids.index(srt.col)
+            keys = tv._keys
+            rest = srt.order(rest, lambda r: keys[r][idx] if r in keys else None)
+        for i, r in enumerate(pinned + rest):
+            tv.move(r, "", i)
+            if r not in pinned:
+                tv.item(r, tags=("even" if i % 2 == 0 else "odd",))
+        for c, base in tv._titles.items():
+            tv.heading(c, text=srt.title(c, base))
 
     # ------------------------------------------------------------------
     # icons (background load from disk cache / CDN, progressive)
@@ -403,6 +461,7 @@ class CxPanel(tk.Frame):
             cur = conn.cursor()
             try:
                 self._schema = derive.resolve_schema(cur)
+                self._short = derive.league_short(cur, self._schema)
             except RuntimeError:
                 self._schema = None
                 self._icon_urls = {}
@@ -412,9 +471,12 @@ class CxPanel(tk.Frame):
                 return
             self._icon_urls = self._load_icon_urls(cur, self._schema)
             rows = derive.liquidity_board(cur, self._schema)
-            ids = self._fill(self.board_tv, [
-                (api, api, (n, f"{derive._f(vwap):.4f}", f"{derive._f(tv):,.0f}"))
-                for api, n, vwap, tv in rows])
+            ids = self._fill(
+                self.board_tv,
+                [(api, api, (n, f"{derive._f(vwap):.4f}", f"{derive._f(tv):,.0f}"))
+                 for api, n, vwap, tv in rows],
+                keys=[(api.lower(), n, derive._f(vwap), derive._f(tv))
+                      for api, n, vwap, tv in rows])
             self._load_icons(self.board_tv, ids)
             if rows:
                 self._hide_placeholder(self.board_ph)
@@ -438,12 +500,13 @@ class CxPanel(tk.Frame):
             cur = conn.cursor()
             schema = self._schema or derive.resolve_schema(cur)
             rows = derive.currency_view(cur, schema, api)
-            ids = self._fill(self.cur_tv, self._cur_rows(api, rows))
+            self._cur_api = api
+            ids = self._fill(self.cur_tv, *self._cur_rows(api, rows))
             self._load_icons(self.cur_tv, ids)
             self.cur_title.config(text=api, fg=FG)
             if rows:
                 self._hide_placeholder(self.cur_ph)
-                self.cur_sub.config(text=self._summary(rows))
+                self.cur_sub.config(text=self._summary(rows, derive.ninja_epoch(cur, schema)))
                 self._load_header_icon(api)
             else:
                 self._show_placeholder(self.cur_ph, f"no traded pairs for “{api}”")
@@ -460,36 +523,39 @@ class CxPanel(tk.Frame):
 
     @staticmethod
     def _cur_rows(api, rows):
-        """Currency-view fill list: the key-pair leg (counter == KEY_COUNTER)
-        pinned first, then the rest in rank order (rate desc). When the currency
-        has legs but none against the key pair, a muted "no data" stub holds
-        the top slot instead — except for the key currency itself, which has no
-        leg against itself. Empty `rows` stays empty (the placeholder speaks)."""
+        """Currency-view fill list + its sort keys: the key-pair leg (counter ==
+        KEY_COUNTER) pinned first, then the rest in rank order (traded desc).
+        Columns: price (X per 1 counter, this hour) · avg 6h (poe.ninja) · 7d
+        (poe.ninja) · traded (base value this hour). When the currency has legs
+        but none against the key pair, a muted "no data" stub holds the top slot
+        instead — except for the key currency itself, which has no leg against
+        itself. Empty `rows` stays empty (the placeholder speaks). The keys
+        mirror the columns as raw numbers (None where the cell is blank, so such
+        rows trail a sort); the stub has none -- it is pinned, never sorted."""
+        num = lambda x: None if x is None else float(x)
         key = [r for r in rows if r[0] == KEY_COUNTER]
         rest = [r for r in rows if r[0] != KEY_COUNTER]
-        fill = []
-        for counter, rate, per_x, vol, cvol, value, cval in (key + rest)[:300]:
+        fill, keys = [], []
+        for counter, price, avg6h, ch7, traded, *_raw in (key + rest)[:300]:
             row = (counter, counter,
-                   (f"{derive._f(rate):.4f}", f"{derive._f(per_x):.4f}",
-                    vol or 0, f"{derive._f(value):,.0f}"))
+                   (derive.fmt_price(price), derive.fmt_price(avg6h),
+                    derive.fmt_pct(ch7), f"{derive._f(traded):,.0f}"))
             fill.append(row + (("key",),) if counter == KEY_COUNTER else row)
+            keys.append((counter.lower(), num(price), num(avg6h), num(ch7),
+                         derive._f(traded)))
         if rows and not key and api != KEY_COUNTER:
             fill.insert(0, (KEY_COUNTER, f"{KEY_COUNTER} · no data",
                             ("—", "—", "—", "—"), ("missing",)))
-        return fill
+            keys.insert(0, None)
+        return fill, keys
 
-    @staticmethod
-    def _summary(rows):
-        """One-line consensus / depth readout (mirrors cx.derive.main)."""
-        f = derive._f
-        liquid = [r for r in rows if f(r[5]) >= derive.MIN_VALUE and f(r[6]) >= derive.MIN_VALUE]
-        if not liquid:
-            return f"{len(rows)} pairs"
-        wv = sum((r[3] or 0) for r in liquid)
-        vwap = sum(f(r[1]) * (r[3] or 0) for r in liquid) / wv if wv else 0.0
-        deep = max(liquid, key=lambda r: f(r[5]))
-        return (f"{len(liquid)} liquid · cons {vwap:.2f} · "
-                f"deep {deep[0][:14]} {f(deep[1]):.2f}")
+    @classmethod
+    def _summary(cls, rows, ninja_epoch=None):
+        """One-line readout: pairs · base value traded this hour · age of the
+        poe.ninja snapshot behind avg 6h / 7d (mirrors cx.derive.main)."""
+        traded = sum(derive._f(r[4]) for r in rows)
+        ninja = f"ninja {cls._ago(ninja_epoch)}" if ninja_epoch else "ninja: no data"
+        return f"{len(rows)} pairs · {traded:,.0f} traded · {ninja}"
 
     def _set_freshness(self, cur, schema):
         try:
@@ -512,6 +578,30 @@ class CxPanel(tk.Frame):
         return f"{int(d // 86400)}d ago"
 
     # ------------------------------------------------------------------
+
+    def _on_cur_click(self, ev):
+        """A click on a counter row pops the pair chart (the currency shown vs
+        that counter). The header and the muted "no data" stub are ignored; a
+        new row replaces the open card."""
+        tv = self.cur_tv
+        rowid = tv.identify_row(ev.y)
+        if not rowid or "missing" in tv.item(rowid, "tags") or not self._cur_api:
+            return
+        counter = tv.item(rowid, "text")
+        self._close_chart()
+        try:
+            self._chart = PairChart(self, self._schema, self._short, self._cur_api,
+                                    counter, ev, tm=self.tm)
+        except Exception:
+            traceback.print_exc()
+
+    def _close_chart(self):
+        if self._chart is not None:
+            try:
+                self._chart.destroy()
+            except Exception:
+                pass
+            self._chart = None
 
     def _on_board_click(self, _event):
         sel = self.board_tv.selection()

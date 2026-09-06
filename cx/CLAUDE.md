@@ -9,7 +9,7 @@ repo root (`C:\POE\POE2`).
 A ticket may carry a token like `⟦uniques.groupbar⟧` or `⟦board.tree[Divine Orb]⟧`.
 The `_eid` inside is **literal in cx's source** — grep it under `cx/ui/` to find
 the exact widget (`uniques.*` → `cx/ui/uniques_panel.py`, `board.*` / currency →
-`cx/ui/cx_panel.py`, `trade.*` → `cx/ui/trade_panel.py`). A `▸` in a token means
+`cx/ui/cx_panel.py`, `trade.*` → `cx/ui/trade_panel.py`, `chart.*` → `cx/ui/pair_chart.py`). A `▸` in a token means
 a descendant of that eid; the eid + text still grep back to the region.
 
 ## Discipline — saturate the kit, never fork it

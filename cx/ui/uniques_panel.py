@@ -47,6 +47,7 @@ from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, BORDER, DULL_GRN, RED,
                     HOVER_BG)
 from .icons import IconCache
 from .row_table import RowTable
+from .colsort import ColumnSort
 from .equipment_nav import EquipmentNav
 from .chrome import work_area_at
 
@@ -468,6 +469,16 @@ def resist_segments(explicits):
             for e, (lo, hi) in zip(("fire", "cold", "lightning"), triad)]
 
 
+def resist_total(explicits):
+    """The resist cell as one number, for the header sort: the three elements'
+    mid-rolls summed (a fixed value is its own mid; 'all elemental' counts three
+    times, as it grants), or None when the piece grants none."""
+    res = elemental_resists(explicits)
+    if not res:
+        return None
+    return sum((lo + hi) / 2.0 for lo, hi in res.values())
+
+
 # Weapon DPS = average hit * attacks/sec. The damage props are ranges ("6-9"); the
 # average is (lo+hi)/2, so DPS for a band = mid(range)*APS. Phys is its own band;
 # "elemental" sums Fire/Cold/Lightning AND the pre-summed "Elemental Damage" key
@@ -524,6 +535,10 @@ class UniquesPanel(tk.Frame):
         self._sel_wtype = None       # weapons: archetype chip within scope, None = all
         self._row_item = {}          # tree rowid -> item dict (for the detail card)
         self._card = None            # the open detail-card Toplevel, or None
+        self._sort = ColumnSort()    # header-click sort (col, direction); None = by level ↑
+        self._titles = {}            # column -> base header text (the arrow paints over it)
+        self._info_kind = None       # what c1/c2 mean now: res / dps / mod (_set_info_headers)
+        self._sub_prefix = ""        # subtitle text before its "· by …" order note
         self._icon_q = queue.Queue()
         self._icon_active = 0
         self._icon_poll = None
@@ -603,14 +618,18 @@ class UniquesPanel(tk.Frame):
         # everything else falls back to the first mod in c1. Headers default to mod.
         self.tv = RowTable(bodyf, ["lvl", "c1", "c2"],
                            rowheight=26, icon_w=ICON_SIZE)
-        self.tv.heading("#0", text="unique")
+        self._retitle("#0", "unique")
         self.tv.column("#0", width=210, minwidth=120, anchor="w", stretch=True)
-        self.tv.heading("lvl", text="lvl")
+        self._retitle("lvl", "lvl")
         self.tv.column("lvl", width=42, anchor="e", stretch=False)
-        self.tv.heading("c1", text="mod")
+        self._retitle("c1", "mod")
         self.tv.column("c1", width=330, anchor="w", stretch=True)
-        self.tv.heading("c2", text="")
+        self._retitle("c2", "")
         self.tv.column("c2", width=72, anchor="e", stretch=False)
+        # a header click sorts the list by that column: first high → low, the
+        # next click flips (the name column opens A → Z) — see _sort_click
+        for c in ("#0", "lvl", "c1", "c2"):
+            self.tv.heading(c, command=lambda c=c: self._sort_click(c))
         sb = ttk.Scrollbar(bodyf, orient="vertical", command=self.tv.yview,
                            style="Subtle.Vertical.TScrollbar")
         self.tv.configure(yscrollcommand=sb.set)
@@ -798,7 +817,7 @@ class UniquesPanel(tk.Frame):
         else:
             items = subs.get(sub, [])
         self.list_title.config(text=f"{group} · {sub}")
-        self.list_sub.config(text=f"{len(items)} uniques · by level ↑")
+        self._set_sub(f"{len(items)} uniques")
         self._fill_items(items)
 
     # ---- leaf-bar hooks: the two data-coupled base bars (built into nav.sub_bar) --
@@ -912,15 +931,14 @@ class UniquesPanel(tk.Frame):
                 sections.append((label, items))
             total = sum(len(it) for _, it in sections)
             self.list_title.config(text=f"Weapons · {scope}")
-            self.list_sub.config(
-                text=f"{total} uniques · {len(sections)} types · by level ↑")
+            self._set_sub(f"{total} uniques · {len(sections)} types")
             self._fill_sectioned(sections)
         else:
             items = [it for it in weapons
                      if (it.get("wtype") or "Other") == self._sel_wtype]
             items.sort(key=_lvl_key)
             self.list_title.config(text=f"Weapons · {scope} · {self._sel_wtype}")
-            self.list_sub.config(text=f"{len(items)} uniques · by level ↑")
+            self._set_sub(f"{len(items)} uniques")
             self._fill_items(items)
 
     # ------------------------------------------------------------- attribute filter
@@ -991,12 +1009,12 @@ class UniquesPanel(tk.Frame):
         else:
             self._fill_items([])
             self.list_title.config(text=group)
-            self.list_sub.config(text="")
+            self._set_sub("")
             self._show_ph("← Str · Dex · Int  (можно несколько)     или  All")
             return
         sel = sorted(sel, key=_lvl_key)
         self.list_title.config(text=f"{group} · {label}")
-        self.list_sub.config(text=f"{len(sel)} uniques · by level ↑")
+        self._set_sub(f"{len(sel)} uniques")
         self._fill_items(sel)
 
     # ------------------------------------------------------------------ items
@@ -1006,22 +1024,30 @@ class UniquesPanel(tk.Frame):
     # _info_cells turns one item into its (c1, c2). A weapon DPS of None reads blank.
     def _set_info_headers(self, group):
         """Retitle the two info columns for *group*: armour -> resist triad header in
-        c1; weapons -> 'phys'/'ele' DPS; otherwise the plain 'mod' fallback."""
+        c1; weapons -> 'phys'/'ele' DPS; otherwise the plain 'mod' fallback. When
+        the columns change MEANING (res / dps / mod) a header sort on them drops
+        back to the level order; the name / lvl sorts carry over."""
+        kind = ("res" if group in _ATTR_GROUPS else
+                "dps" if group == "Weapons" else "mod")
+        if kind != self._info_kind and self._sort.col in ("c1", "c2"):
+            self._sort.reset()
+        self._info_kind = kind
         if group in _ATTR_GROUPS:                 # armour: elemental resistances
-            self.tv.heading("c1", text="res  (f c l)")
+            self._retitle("c1", "res  (f c l)")
             self.tv.column("c1", width=160, anchor="w", stretch=False)
-            self.tv.heading("c2", text="")
+            self._retitle("c2", "")
             self.tv.column("c2", width=0, stretch=False)
         elif group == "Weapons":
-            self.tv.heading("c1", text="phys dps")
+            self._retitle("c1", "phys dps")
             self.tv.column("c1", width=84, anchor="e", stretch=False)
-            self.tv.heading("c2", text="ele dps")
+            self._retitle("c2", "ele dps")
             self.tv.column("c2", width=84, anchor="e", stretch=False)
         else:
-            self.tv.heading("c1", text="mod")
+            self._retitle("c1", "mod")
             self.tv.column("c1", width=330, anchor="w", stretch=True)
-            self.tv.heading("c2", text="")
+            self._retitle("c2", "")
             self.tv.column("c2", width=0, stretch=False)
+        self._paint_headers()
 
     def _info_cells(self, it):
         """(c1, c2) for *it* by kind: armour -> ('16 0 10', ''); weapon -> ('123',
@@ -1035,6 +1061,79 @@ class UniquesPanel(tk.Frame):
             return ("" if phys is None else str(phys),
                     "" if ele is None else str(ele))
         return it.get("mod", ""), ""
+
+    # ---- header sort: click a column -> high → low, click again -> low → high --
+    # ColumnSort holds (column, direction). The keys below read the raw item, so
+    # the order is numeric, not the cell text; _reorder moves the rows in place
+    # (per section in the grouped weapon view). No active column = the level
+    # order the fills arrive in ("by level ↑").
+    def _retitle(self, col, text):
+        """Set a column's base header text; the sort arrow is painted over it."""
+        self._titles[col] = text
+        self.tv.heading(col, text=self._sort.title(col, text))
+
+    def _paint_headers(self):
+        for c, base in self._titles.items():
+            self.tv.heading(c, text=self._sort.title(c, base))
+
+    def _sort_key(self, col):
+        """item -> raw sort value for header column *col* under the selected group:
+        name (text) · level (none = 0, as in _lvl_key) · the info columns by kind
+        -- armour: total elemental resist (mid-rolls summed); weapons: phys / ele
+        DPS; otherwise the first mod's text. None = no value (such rows trail)."""
+        if col == "#0":
+            return lambda it: it["name"].lower()
+        if col == "lvl":
+            return lambda it: it["lvl"] or 0
+        group = self._sel_group
+        if group in _ATTR_GROUPS:
+            if col == "c1":
+                return lambda it: resist_total(it.get("explicits"))
+        elif group == "Weapons":
+            i = 0 if col == "c1" else 1
+            return lambda it: weapon_dps(it.get("props"))[i]
+        elif col == "c1":
+            return lambda it: (it.get("mod") or "").lower() or None
+        return lambda it: None                   # a hidden / empty column
+
+    def _sort_click(self, col):
+        self._sort.click(col)
+        self._reorder()
+        self._set_sub(self._sub_prefix)
+
+    def _reorder(self):
+        """Apply the active header sort to the rows on screen, in place: rows move
+        (their icons and _row_item entries ride along), within each section when
+        the view is grouped; the stripe is redone in the new order; the active
+        header gets its arrow. With no active column the fill order stands."""
+        tv = self.tv
+        if self._sort.col is not None:
+            self._hover_restore(tv)
+            self._close_card()
+            key = self._sort_key(self._sort.col)
+            parents = [""] + [r for r in tv.get_children("") if r not in self._row_item]
+            for parent in parents:
+                kids = [r for r in tv.get_children(parent) if r in self._row_item]
+                kids = self._sort.order(kids, lambda r: key(self._row_item[r]))
+                for i, r in enumerate(kids):
+                    tv.move(r, parent, i)
+                    tv.item(r, tags=("even" if i % 2 == 0 else "odd",))
+        self._paint_headers()
+
+    def _sort_label(self):
+        """The subtitle's order note: 'by level ↑' (the default) or the active
+        header, e.g. 'by phys dps ↓'."""
+        s = self._sort
+        if s.col is None:
+            return "by level ↑"
+        name = "name" if s.col == "#0" else self._titles.get(s.col, s.col)
+        return f"by {name} {s.mark}"
+
+    def _set_sub(self, prefix):
+        """Subtitle = *prefix* · the order note; the prefix is kept so a header
+        click can re-render it with the new order."""
+        self._sub_prefix = prefix
+        self.list_sub.config(text=f"{prefix} · {self._sort_label()}" if prefix else "")
 
     def _fill_items(self, items):
         self._hover_restore(self.tv)
@@ -1050,6 +1149,7 @@ class UniquesPanel(tk.Frame):
                                  tags=("even" if i % 2 == 0 else "odd",))
             ids.append((rid, it["key"]))
             self._row_item[rid] = it
+        self._reorder()                       # the header sort, if one is active
         if items:
             self.ph.place_forget()
         else:
@@ -1074,6 +1174,7 @@ class UniquesPanel(tk.Frame):
                                      tags=("even" if i % 2 == 0 else "odd",))
                 ids.append((rid, it["key"]))
                 self._row_item[rid] = it          # section header rows excluded
+        self._reorder()                       # the header sort, if one is active
         if sections:
             self.ph.place_forget()
         else:

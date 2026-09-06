@@ -125,9 +125,14 @@ def snapshot_pairs(short: str) -> list:
     return get(f"/{REALM}/Leagues/{short}/SnapshotPairs")
 
 
-def pair_history(short: str, item_id_1: int, item_id_2: int, limit: int = 2000) -> dict:
-    """Per-pair hourly history (keyed by ItemId). Returns {History:[...], Meta, ...}."""
-    return get(f"/{REALM}/Leagues/{short}/Currencies/Pairs/{item_id_1}/{item_id_2}/History?Limit={limit}")
+def pair_history(short: str, item_id_1: int, item_id_2: int, limit: int = 2000,
+                 end_epoch: int = None) -> dict:
+    """Per-pair hourly history (keyed by ItemId), newest first. Returns
+    {History:[...], Meta:{HasMore}, ...}. Pages backwards with `end_epoch`
+    (rows at or before it) while Meta.HasMore; Limit=5000 covers a whole
+    three-month league in one call (runes: 2387 rows, 0.9 MB, 0.6 s)."""
+    q = f"Limit={limit}" + (f"&EndEpoch={int(end_epoch)}" if end_epoch is not None else "")
+    return get(f"/{REALM}/Leagues/{short}/Currencies/Pairs/{item_id_1}/{item_id_2}/History?{q}")
 
 
 # ---- items ------------------------------------------------------------------

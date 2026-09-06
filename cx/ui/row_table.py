@@ -16,10 +16,11 @@ A canvas threads both needles: it is one widget (so the inspector sees it exactl
 like a Treeview), its rows are canvas *items* (so events always land on the canvas),
 and a rectangle behind a cell gives a true per-cell background. So RowTable mimics
 the Treeview method-subset the panel calls — ``heading`` / ``column`` /
-``tag_configure`` / ``insert`` / ``delete`` / ``get_children`` / ``item`` /
+``tag_configure`` / ``insert`` / ``delete`` / ``move`` / ``get_children`` / ``item`` /
 ``exists`` / ``identify_row`` / ``identify_column`` / ``cget("columns")`` — plus the
-native canvas ``yview`` / ``yscrollcommand`` for the scrollbar. It stays a drop-in:
-``self.tv = RowTable(...)`` and the rest of the panel is unchanged.
+native canvas ``yview`` / ``yscrollcommand`` for the scrollbar. A click on a header
+cell runs that column's ``heading(command=...)``, as a Treeview's does. It stays a
+drop-in: ``self.tv = RowTable(...)`` and the rest of the panel is unchanged.
 
 Cell values are plain strings, OR a list of ``(text, bg, fg)`` *segments* for a
 coloured cell (the resist triad). Segments render left-to-right within the column,
@@ -77,6 +78,7 @@ class RowTable(tk.Canvas):
         self._header = tk.Canvas(parent, height=headerheight, bg=header_bg,
                                  highlightthickness=0, bd=0, takefocus=0)
         self._header.pack(side="top", fill="x")
+        self._header.bind("<Button-1>", self._on_header_click)
 
         self.bind("<Configure>", lambda e: self._schedule())
         # the wheel: a Canvas has no default scroll (Treeview did). Bind it only
@@ -89,13 +91,26 @@ class RowTable(tk.Canvas):
         self.yview_scroll(-3 if e.delta > 0 else 3, "units")
         return "break"
 
+    def _on_header_click(self, e):
+        """Header click -> that column's ``heading(command=...)`` (Treeview's
+        contract); a column without one ignores the click. Resolved by x against
+        the laid-out column boxes, so it tracks stretch and hidden (0-width) columns."""
+        for c, (x0, x1) in self._colx.items():
+            if x0 <= e.x < x1:
+                cmd = self._cfg[c].get("command")
+                if cmd is not None:
+                    cmd()
+                return
+
     # -- tiket_master needs these set by tag_table; nothing here references them,
     #    but identify_row/identify_column below are what it actually calls.
 
     # ------------------------------------------------------------------ columns
-    def heading(self, col, text=None, **kw):
+    def heading(self, col, text=None, command=None, **kw):
         if text is not None:
             self._cfg[col]["title"] = text
+        if command is not None:
+            self._cfg[col]["command"] = command
         self._schedule()
 
     def column(self, col, width=None, minwidth=None, anchor=None,
@@ -155,6 +170,22 @@ class RowTable(tk.Canvas):
         siblings = self._kids.get(rec["parent"])
         if siblings and rid in siblings:
             siblings.remove(rid)
+
+    def move(self, rid, parent, index):
+        """Treeview's ``move``: put *rid* at *index* among *parent*'s children
+        (re-parenting if needed). The row keeps its record, icon and id, so a
+        sort moves rows without a refill."""
+        rec = self._rec.get(rid)
+        if rec is None:
+            return
+        old = self._kids.get(rec["parent"])
+        if old and rid in old:
+            old.remove(rid)
+        rec["parent"] = parent
+        kids = self._kids.setdefault(parent, [])
+        pos = len(kids) if index == "end" else max(0, min(int(index), len(kids)))
+        kids.insert(pos, rid)
+        self._schedule()
 
     def get_children(self, item=""):
         return list(self._kids.get(item, ()))

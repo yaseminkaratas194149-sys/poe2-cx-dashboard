@@ -1,10 +1,10 @@
 """poe2scout pull stages (mirrors DATA/pipeline/stages/api_stages.py).
 
-`PairsStage` is the hourly cycle; the other three join it in the Actualize cycle
-(`build_stages(full=True)`): backfill the recent history, merge the unique-item
-reference, refresh the trade2 stat dictionary. Their cores live in `cx.backfill`,
-`cx.uniques`, `cx.trade` and are imported lazily -- those modules import the
-stage package for their CLIs.
+`PairsStage` and `NinjaStage` are the hourly cycle; the other three join them in
+the Actualize cycle (`build_stages(full=True)`): backfill the recent history,
+merge the unique-item reference, refresh the trade2 stat dictionary. Their cores
+live in `cx.ninja`, `cx.backfill`, `cx.uniques`, `cx.trade` and are imported
+lazily -- those modules import the stage package for their CLIs.
 """
 import psycopg2
 
@@ -42,6 +42,23 @@ class PairsStage(Stage):
 
         self.log(f"currencies={n_cur} pairs={n_pairs} @ {epoch}")
         return {"count": n_pairs, "last_slot": epoch * 1000}
+
+
+class NinjaStage(Stage):
+    """Pull every poe.ninja exchange overview (cx.ninja) into ninja_price: the
+    smoothed reference price (6h VWAP + 7d per currency) beside the hour's own
+    pairs. Independent of the pairs pull, so the runner overlaps them."""
+
+    name = "cx12_ninja"
+    label = "ninja"
+    deps = ["cx00_provision"]
+
+    def run(self, ctx):
+        from cx.ninja import refresh_prices
+        prov = ctx["cx00_provision"]
+        res = refresh_prices(prov["schema"], prov["league"], log=self.log,
+                             progress=lambda done, total: self.progress(done, total))
+        return {"count": res["rows"], "fail": res["fail"], "unchanged": res["unchanged"]}
 
 
 class BackfillStage(Stage):

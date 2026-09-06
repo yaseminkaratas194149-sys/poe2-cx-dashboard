@@ -67,6 +67,32 @@ def upsert_market(cur, schema: str, epoch: int, snap: dict):
     )
 
 
+def upsert_ninja(cur, schema: str, hour_epoch: int, rows: list) -> int:
+    """UPSERT {schema}.ninja_price for one fetch hour. rows (from cx.ninja.rows_of):
+    (api_id, value, volume, max_pair, max_rate, change_7d, category, name);
+    deduped by api_id. Keyed by slug, no FK -- poe.ninja lists currencies the
+    pair feed has not shown yet."""
+    by_id = {}
+    for api, value, volume, max_pair, max_rate, change_7d, category, name in rows:
+        by_id[api] = (api, hour_epoch, _num(value), _num(volume), max_pair,
+                      _num(max_rate), _num(change_7d), category, name)
+    vals = list(by_id.values())
+    if not vals:
+        return 0
+    execute_values(
+        cur,
+        f"INSERT INTO {schema}.ninja_price "
+        f"(api_id, hour_epoch, value, volume, max_pair, max_rate, change_7d, category, name) "
+        f"VALUES %s "
+        f"ON CONFLICT (api_id, hour_epoch) DO UPDATE SET "
+        f"value = EXCLUDED.value, volume = EXCLUDED.volume, max_pair = EXCLUDED.max_pair, "
+        f"max_rate = EXCLUDED.max_rate, change_7d = EXCLUDED.change_7d, "
+        f"category = EXCLUDED.category, name = EXCLUDED.name",
+        vals,
+    )
+    return len(vals)
+
+
 def upsert_pairs(cur, schema: str, pairs: list, epoch: int) -> int:
     """UPSERT cx_pair_snapshot for one hour. Canonicalized + deduped by (cur1, cur2)."""
     by_key = {}
@@ -93,7 +119,7 @@ def upsert_pairs(cur, schema: str, pairs: list, epoch: int) -> int:
         f" rate1, volume1, value1, stock1, high_stock1, "
         f" rate2, volume2, value2, stock2, high_stock2) VALUES %s "
         f"ON CONFLICT (cur1, cur2, hour_epoch) DO UPDATE SET "
-        f"snapshot_id = EXCLUDED.snapshot_id, "
+        f"snapshot_id = COALESCE(EXCLUDED.snapshot_id, pair_snapshot.snapshot_id), "
         f"rate1 = EXCLUDED.rate1, volume1 = EXCLUDED.volume1, value1 = EXCLUDED.value1, "
         f"stock1 = EXCLUDED.stock1, high_stock1 = EXCLUDED.high_stock1, "
         f"rate2 = EXCLUDED.rate2, volume2 = EXCLUDED.volume2, value2 = EXCLUDED.value2, "

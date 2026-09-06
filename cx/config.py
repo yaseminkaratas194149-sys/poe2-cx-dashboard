@@ -31,6 +31,14 @@ UNIQUES_LEAGUE_SHORT = None
 # Hours of per-pair history the Actualize cycle backfills (stage cx11_backfill).
 BACKFILL_HOURS = 48
 POE2SCOUT_BASE = "https://api.poe2scout.com"
+# poe.ninja PoE2 economy API (https://poe.ninja/docs/api): the smoothed reference
+# price -- one number per currency, the 6h VWAP of its max-volume pair in exalted,
+# plus a 7-day change. The hourly `cx12_ninja` stage pulls every exchange type
+# below into ninja_price (cx.ninja). The league id it takes is our `league.league`.
+NINJA_BASE = "https://poe.ninja"
+NINJA_TYPES = ["Currency", "Fragments", "Abyss", "UncutGems", "LineageSupportGems",
+               "Essences", "SoulCores", "Idols", "Runes", "Ritual", "Expedition",
+               "Delirium", "Breach", "Verisium"]
 # poe2scout asks callers to identify themselves. Public code carries only the
 # repo URL (identifiable, no personal data); set POE2CX_CONTACT in the environment
 # to your own contact (e.g. an email) for your own runs.
