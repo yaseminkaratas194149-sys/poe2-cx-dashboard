@@ -479,6 +479,57 @@ def resist_total(explicits):
     return sum((lo + hi) / 2.0 for lo, hi in res.values())
 
 
+# ---- boots: movement speed --------------------------------------------------
+# Boots carry one more derived cell, MS, and it is PINNED for the whole group:
+# movement speed is what a pair is judged by, so the column stays on even for the
+# few uniques that grant none (they read "—") rather than appearing per item.
+# Only the unconditional line counts — "(15-25)% increased Movement Speed" — so
+# the number is what the boots always give; conditional riders ("per Frenzy
+# Charge", "while affected by an Ailment", "when on Full Life", "at random when
+# Hit") and "less Movement and Skill Speed" are excluded, the way the resist
+# column excludes MAXIMUM-resistance lines. The regex therefore demands the mod
+# be the roll and nothing else: no letters before the '%', nothing after "Speed".
+# 'reduced' rolls are stored already-negative ("(-10--10)% reduced Movement
+# Speed"), so the sign carries as-is.
+_MS_RE = re.compile(r"^[^A-Za-z]*%\s*(?:increased|reduced)\s+Movement\s+Speed$", re.I)
+
+
+def movement_speed(explicits):
+    """The flat movement speed a boot grants, as an (lo, hi) percent roll range
+    (lo == hi for a fixed roll), or None when it grants none. Several flat lines
+    add interval-wise, as in elemental_resists()."""
+    lo = hi = None
+    for m in (explicits or []):
+        if not _MS_RE.match(str(m).strip()):
+            continue
+        rng = _roll_range(m)
+        if rng is None:
+            continue
+        lo = rng[0] if lo is None else lo + rng[0]
+        hi = rng[1] if hi is None else hi + rng[1]
+    if lo is None:
+        return None
+    return (int(round(lo)), int(round(hi)))
+
+
+def ms_text(explicits):
+    """The MS cell: "30" for a fixed roll, "10-20" for a range, "—" when the pair
+    grants no movement speed at all (the column is pinned, so the cell has to say
+    'none' rather than go blank)."""
+    ms = movement_speed(explicits)
+    if ms is None:
+        return "—"
+    lo, hi = ms
+    return str(lo) if lo == hi else f"{lo}-{hi}"
+
+
+def ms_total(explicits):
+    """The MS cell as one number for the header sort — the mid-roll — or None for
+    a pair that grants none (those trail either way)."""
+    ms = movement_speed(explicits)
+    return None if ms is None else (ms[0] + ms[1]) / 2.0
+
+
 # Weapon DPS = average hit * attacks/sec. The damage props are ranges ("6-9"); the
 # average is (lo+hi)/2, so DPS for a band = mid(range)*APS. Phys is its own band;
 # "elemental" sums Fire/Cold/Lightning AND the pre-summed "Elemental Damage" key
@@ -1020,14 +1071,17 @@ class UniquesPanel(tk.Frame):
     # ------------------------------------------------------------------ items
     # The two info columns are filled by item kind: armour -> elemental resists in c1
     # ("fire cold lightning"), weapons -> phys DPS in c1 / ele DPS in c2, everything
-    # else -> first mod in c1. _set_info_headers retitles them for the chosen group;
-    # _info_cells turns one item into its (c1, c2). A weapon DPS of None reads blank.
+    # else -> first mod in c1. Boots additionally pin MS into c2 (see movement_speed).
+    # _set_info_headers retitles them for the chosen group; _info_cells turns one item
+    # into its (c1, c2). A weapon DPS of None reads blank.
     def _set_info_headers(self, group):
         """Retitle the two info columns for *group*: armour -> resist triad header in
-        c1; weapons -> 'phys'/'ele' DPS; otherwise the plain 'mod' fallback. When
-        the columns change MEANING (res / dps / mod) a header sort on them drops
+        c1; BOOTS keep that and add the pinned 'ms' column in c2; weapons ->
+        'phys'/'ele' DPS; otherwise the plain 'mod' fallback. When the columns
+        change MEANING (res / res+ms / dps / mod) a header sort on them drops
         back to the level order; the name / lvl sorts carry over."""
-        kind = ("res" if group in _ATTR_GROUPS else
+        kind = ("res+ms" if group == "Boots" else
+                "res" if group in _ATTR_GROUPS else
                 "dps" if group == "Weapons" else "mod")
         if kind != self._info_kind and self._sort.col in ("c1", "c2"):
             self._sort.reset()
@@ -1035,8 +1089,10 @@ class UniquesPanel(tk.Frame):
         if group in _ATTR_GROUPS:                 # armour: elemental resistances
             self._retitle("c1", "res  (f c l)")
             self.tv.column("c1", width=160, anchor="w", stretch=False)
-            self._retitle("c2", "")
-            self.tv.column("c2", width=0, stretch=False)
+            # boots always show movement speed, even the pairs that grant none
+            self._retitle("c2", "ms" if group == "Boots" else "")
+            self.tv.column("c2", width=(56 if group == "Boots" else 0),
+                           anchor="e", stretch=False)
         elif group == "Weapons":
             self._retitle("c1", "phys dps")
             self.tv.column("c1", width=84, anchor="e", stretch=False)
@@ -1050,12 +1106,14 @@ class UniquesPanel(tk.Frame):
         self._paint_headers()
 
     def _info_cells(self, it):
-        """(c1, c2) for *it* by kind: armour -> ('16 0 10', ''); weapon -> ('123',
-        '88') phys/ele DPS; other -> (first-mod, ''). Driven off the selected group
-        so an item shows the same two values whichever sub-filter surfaced it."""
+        """(c1, c2) for *it* by kind: armour -> ('16 0 10', ''), boots -> that plus
+        the MS cell ('25' / '10-20' / '—') in c2; weapon -> ('123', '88') phys/ele
+        DPS; other -> (first-mod, ''). Driven off the selected group so an item
+        shows the same two values whichever sub-filter surfaced it."""
         group = self._sel_group
         if group in _ATTR_GROUPS:
-            return resist_segments(it.get("explicits")), ""
+            return (resist_segments(it.get("explicits")),
+                    ms_text(it.get("explicits")) if group == "Boots" else "")
         if group == "Weapons":
             phys, ele = weapon_dps(it.get("props"))
             return ("" if phys is None else str(phys),
@@ -1079,8 +1137,9 @@ class UniquesPanel(tk.Frame):
     def _sort_key(self, col):
         """item -> raw sort value for header column *col* under the selected group:
         name (text) · level (none = 0, as in _lvl_key) · the info columns by kind
-        -- armour: total elemental resist (mid-rolls summed); weapons: phys / ele
-        DPS; otherwise the first mod's text. None = no value (such rows trail)."""
+        -- armour: total elemental resist (mid-rolls summed), boots also movement
+        speed on c2; weapons: phys / ele DPS; otherwise the first mod's text.
+        None = no value (such rows trail)."""
         if col == "#0":
             return lambda it: it["name"].lower()
         if col == "lvl":
@@ -1089,6 +1148,8 @@ class UniquesPanel(tk.Frame):
         if group in _ATTR_GROUPS:
             if col == "c1":
                 return lambda it: resist_total(it.get("explicits"))
+            if col == "c2" and group == "Boots":
+                return lambda it: ms_total(it.get("explicits"))
         elif group == "Weapons":
             i = 0 if col == "c1" else 1
             return lambda it: weapon_dps(it.get("props"))[i]
