@@ -27,6 +27,12 @@ from .icons import IconCache
 STRIPE_A = BG3          # "#2d2d2d"
 STRIPE_B = "#272728"
 
+# The key pair. Every currency is read against Divine Orb first, so its leg is
+# pinned to the top of the currency view — or a "no data" stub sits there when
+# the latest hour carries no divine leg for that currency.
+KEY_COUNTER = "divine"
+KEY_BG = "#37373d"      # pinned-row tint (same as the uniques section rows)
+
 PLACEHOLDER = "currency…"
 ICON_SIZE = 20          # per-row currency icon (px)
 HDR_ICON_SIZE = 26      # currency-card header icon (px)
@@ -162,6 +168,8 @@ class CxPanel(tk.Frame):
         tv.tag_configure("even", background=STRIPE_A)
         tv.tag_configure("odd", background=STRIPE_B)
         tv.tag_configure("hover", background=HOVER_BG)
+        tv.tag_configure("key", background=KEY_BG)                      # pinned key pair
+        tv.tag_configure("missing", background=KEY_BG, foreground=FG_MUTED)  # ...absent
         tv._hover_row = ""
         tv._hover_tags = ()
         tv.bind("<Motion>", self._hover_motion)
@@ -237,14 +245,16 @@ class CxPanel(tk.Frame):
         ph.place_forget()
 
     def _fill(self, tv, rows):
-        """Fill a tree. rows: (api_id, name_text, (col values...)). The name goes
-        in #0 (with the icon, loaded later); returns [(rowid, api_id)]."""
+        """Fill a tree. rows: (api_id, name_text, (col values...)[, tags]). The
+        name goes in #0 (with the icon, loaded later); a row without its own
+        tags gets the stripe. Returns [(rowid, api_id)]."""
         self._hover_restore(tv)
         tv.delete(*tv.get_children())
         ids = []
-        for i, (api, text, vals) in enumerate(rows):
-            rid = tv.insert("", "end", text=text, values=vals,
-                            tags=("even" if i % 2 == 0 else "odd",))
+        for i, row in enumerate(rows):
+            api, text, vals = row[:3]
+            tags = row[3] if len(row) > 3 else ("even" if i % 2 == 0 else "odd",)
+            rid = tv.insert("", "end", text=text, values=vals, tags=tags)
             ids.append((rid, api))
         return ids
 
@@ -428,10 +438,7 @@ class CxPanel(tk.Frame):
             cur = conn.cursor()
             schema = self._schema or derive.resolve_schema(cur)
             rows = derive.currency_view(cur, schema, api)
-            ids = self._fill(self.cur_tv, [
-                (counter, counter, (f"{derive._f(rate):.4f}", f"{derive._f(per_x):.4f}",
-                                    vol or 0, f"{derive._f(value):,.0f}"))
-                for counter, rate, per_x, vol, cvol, value, cval in rows[:300]])
+            ids = self._fill(self.cur_tv, self._cur_rows(api, rows))
             self._load_icons(self.cur_tv, ids)
             self.cur_title.config(text=api, fg=FG)
             if rows:
@@ -450,6 +457,26 @@ class CxPanel(tk.Frame):
         finally:
             if conn is not None:
                 conn.close()
+
+    @staticmethod
+    def _cur_rows(api, rows):
+        """Currency-view fill list: the key-pair leg (counter == KEY_COUNTER)
+        pinned first, then the rest in rank order (rate desc). When the currency
+        has legs but none against the key pair, a muted "no data" stub holds
+        the top slot instead — except for the key currency itself, which has no
+        leg against itself. Empty `rows` stays empty (the placeholder speaks)."""
+        key = [r for r in rows if r[0] == KEY_COUNTER]
+        rest = [r for r in rows if r[0] != KEY_COUNTER]
+        fill = []
+        for counter, rate, per_x, vol, cvol, value, cval in (key + rest)[:300]:
+            row = (counter, counter,
+                   (f"{derive._f(rate):.4f}", f"{derive._f(per_x):.4f}",
+                    vol or 0, f"{derive._f(value):,.0f}"))
+            fill.append(row + (("key",),) if counter == KEY_COUNTER else row)
+        if rows and not key and api != KEY_COUNTER:
+            fill.insert(0, (KEY_COUNTER, f"{KEY_COUNTER} · no data",
+                            ("—", "—", "—", "—"), ("missing",)))
+        return fill
 
     @staticmethod
     def _summary(rows):

@@ -3,7 +3,8 @@
 Drill-down like the poe2scout item browser, now three tiers: a row of fixed
 META-category chips (Weapon · Offhands · Armour · Others) → the chosen meta's
 groups opened in one line → a row of base chips for the chosen group → the
-uniques in that base, sorted by required level (low → high), each with its icon,
+uniques in that base, sorted by required level (low → high; no requirement counts
+as level 0, so those come first), each with its icon,
 level and a mod. The meta split is a static system-level table (_META_GROUPS),
 permanent and never derived from data; see meta_of().
 
@@ -25,10 +26,12 @@ from the league schema with the freshest pairs (derive.resolve_schema). A row
 click pops the detail card; a DOUBLE click (and the card's "↗ Open trade2"
 button) opens a trade2 tab for that unique in the tracked league, through the
 same browser hand-off the Trade view uses (trade.unique_preset -> #cxq). The
-category/base taxonomy is DERIVED from poe2scout's coarse category + the base
-type via the heuristic classify() below — poe2scout's unique data has only 7
-coarse categories, so the screenshot-style split (Body Armours / Helmets / Bow /
-Staff …) is reconstructed from base-type keywords. Tune the tables freely.
+category/base taxonomy is DERIVED from poe2scout's coarse category via classify()
+below — poe2scout's unique data has only 7 coarse categories, so the
+screenshot-style split (Body Armours / Helmets / Bow / Staff …) is reconstructed
+from the item CLASS poe2scout keeps in `properties` (weapons and armour — the
+same marker the detail card shows) and from base-type keywords (the rest, and as
+the fallback). Tune the tables freely.
 """
 import queue
 import re
@@ -45,6 +48,7 @@ from .theme import (BG, BG2, BG3, FG, FG_DIM, FG_MUTED, BORDER, DULL_GRN, RED,
 from .icons import IconCache
 from .row_table import RowTable
 from .equipment_nav import EquipmentNav
+from .chrome import work_area_at
 
 ICON_SIZE = 22
 STRIPE_A, STRIPE_B = BG3, "#272728"
@@ -54,10 +58,12 @@ STRIPE_A, STRIPE_B = BG3, "#272728"
 # back to the base type as its own subgroup, so nothing is hidden or misfiled.
 
 # poe2scout's ItemMetadata.properties carries the real item CLASS as one of its
-# keys (e.g. "One Hand Mace", "Crossbow", "Spear") — far more reliable than
-# guessing from the base-type name (Morning Star / Warpick are maces; a "Runic
-# Fork" is actually a wand). These keys are STATS, to be skipped when isolating
-# the class key.
+# keys (e.g. "One Hand Mace", "Crossbow", "Spear", "Gloves", "Boots") — far more
+# reliable than guessing from the base-type name (Morning Star / Warpick are
+# maces; a "Runic Fork" is actually a wand; "Aged Cuffs" / "Linen Wraps" are
+# gloves, "Secured Leggings" boots, "Grand Visage" a helmet). The class key is
+# the null-valued one (see build_sections); these keys are STATS, to be skipped
+# when isolating it.
 _STAT_KEYS = {
     "Physical Damage", "Elemental Damage", "Fire Damage", "Cold Damage",
     "Lightning Damage", "Chaos Damage", "Attacks per Second",
@@ -82,6 +88,15 @@ _HELMET = ("Helm", "Mask", "Circlet", "Cap", "Crown", "Hood", "Burgonet",
 _GLOVES = ("Glove", "Mitt", "Gauntlet", "Bracer")
 _BOOTS = ("Boot", "Sandal", "Greave", "Shoe", "Slipper")
 _SHIELD = ("Shield", "Buckler")
+# armour class-keyword -> group (substring match, so culture-prefixed variants
+# fold: "Kalguuran Shield"→Offhands, "Ezomyte Gloves"→Gloves). Offhands = the
+# off-hand slot: shields, bucklers, foci and quivers.
+_ARMOUR_CLASSES = [
+    ("Body Armour", "Body Armours"), ("Helmet", "Helmets"),
+    ("Gloves", "Gloves"), ("Boots", "Boots"),
+    ("Shield", "Offhands"), ("Buckler", "Offhands"), ("Focus", "Offhands"),
+    ("Quiver", "Offhands"),
+]
 
 
 def _weapon_class(props, base_type):
@@ -103,9 +118,33 @@ def _weapon_class(props, base_type):
     return base_type or "Other"
 
 
+def _armour_group(props, base_type):
+    """Armour group — prefer poe2scout's class marker (the null-valued property
+    key: 'Gloves', 'Boots', 'Helmet', 'Body Armour', 'Shield', 'Quiver', …), fall
+    back to base-type keywords when the marker is missing."""
+    if isinstance(props, dict):
+        for k, v in props.items():          # the class marker in properties
+            if v is not None or k in _STAT_KEYS:
+                continue
+            for kw, group in _ARMOUR_CLASSES:
+                if kw.lower() in k.lower():
+                    return group
+    btl = (base_type or "").lower()         # fall back to the base-type name
+    if any(k.lower() in btl for k in _SHIELD) or "focus" in btl or "quiver" in btl:
+        return "Offhands"
+    if any(k.lower() in btl for k in _GLOVES):
+        return "Gloves"
+    if any(k.lower() in btl for k in _BOOTS):
+        return "Boots"
+    if any(k.lower() in btl for k in _HELMET):
+        return "Helmets"
+    return "Body Armours"
+
+
 def classify(category, base_type, props=None):
-    """-> (group, subgroup). Weapons take their class from poe2scout properties
-    (One Hand Mace, Two Hand Mace, Crossbow, …); the rest derive from base_type.
+    """-> (group, subgroup). Weapons and armour take their class from poe2scout
+    properties (One Hand Mace, Crossbow, Gloves, Boots, Quiver, …); the rest
+    derive from base_type.
 
     Non-weapon keyword matching is CASE-INSENSITIVE so compounds fold into their
     group instead of splintering into singletons."""
@@ -115,15 +154,7 @@ def classify(category, base_type, props=None):
     if cat == "weapon":
         return "Weapons", _weapon_class(props, bt)
     if cat == "armour":
-        if any(k.lower() in btl for k in _SHIELD) or "focus" in btl:
-            return "Offhands", bt
-        if any(k.lower() in btl for k in _GLOVES):
-            return "Gloves", bt
-        if any(k.lower() in btl for k in _BOOTS):
-            return "Boots", bt
-        if any(k.lower() in btl for k in _HELMET):
-            return "Helmets", bt
-        return "Body Armours", bt
+        return _armour_group(props, bt), bt
     if cat == "accessory":
         if "ring" in btl:
             return "Jewellery", "Ring"
@@ -282,6 +313,13 @@ _PROP_ORD = {k: i for i, k in enumerate(_PROP_ORDER)}
 
 def _clean(text):
     return str(text).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _lvl_key(it):
+    """Sort key for a unique: required level ascending, then name. A unique with
+    no level requirement is wearable from the start, so it counts as level 0 and
+    sorts FIRST -- not last, as a bare ``None`` would."""
+    return (it["lvl"] or 0, it["name"])
 
 
 def build_sections(name, base, req, implicits, explicits, flavour, props):
@@ -646,7 +684,7 @@ class UniquesPanel(tk.Frame):
             data.setdefault(group, {}).setdefault(sub, []).append(item)
         for g in data:
             for s in data[g]:
-                data[g][s].sort(key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
+                data[g][s].sort(key=_lvl_key)
         self._data, self._icon_urls = data, urls
 
     def _ordered_groups(self):
@@ -756,7 +794,7 @@ class UniquesPanel(tk.Frame):
         subs = self._data.get(group, {})
         if sub == "All":
             items = [it for lst in subs.values() for it in lst]
-            items.sort(key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
+            items.sort(key=_lvl_key)
         else:
             items = subs.get(sub, [])
         self.list_title.config(text=f"{group} · {sub}")
@@ -870,7 +908,7 @@ class UniquesPanel(tk.Frame):
             sections = []
             for label in sorted(buckets, key=lambda k: (-len(buckets[k]), k)):
                 items = sorted(buckets[label],
-                               key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
+                               key=_lvl_key)
                 sections.append((label, items))
             total = sum(len(it) for _, it in sections)
             self.list_title.config(text=f"Weapons · {scope}")
@@ -880,7 +918,7 @@ class UniquesPanel(tk.Frame):
         else:
             items = [it for it in weapons
                      if (it.get("wtype") or "Other") == self._sel_wtype]
-            items.sort(key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
+            items.sort(key=_lvl_key)
             self.list_title.config(text=f"Weapons · {scope} · {self._sel_wtype}")
             self.list_sub.config(text=f"{len(items)} uniques · by level ↑")
             self._fill_items(items)
@@ -956,7 +994,7 @@ class UniquesPanel(tk.Frame):
             self.list_sub.config(text="")
             self._show_ph("← Str · Dex · Int  (можно несколько)     или  All")
             return
-        sel = sorted(sel, key=lambda it: (it["lvl"] is None, it["lvl"] or 0, it["name"]))
+        sel = sorted(sel, key=_lvl_key)
         self.list_title.config(text=f"{group} · {label}")
         self.list_sub.config(text=f"{len(sel)} uniques · by level ↑")
         self._fill_items(sel)
@@ -1093,8 +1131,9 @@ class UniquesPanel(tk.Frame):
             self._card = None
 
     def _show_card(self, it, ev):
-        """A frameless tooltip near the cursor, built by build_sections(). Closes on
-        Esc / click / losing focus; a new row replaces it. Topmost, like the app."""
+        """A frameless tooltip near the cursor, on the cursor's monitor, built by
+        build_sections(). Closes on Esc / click / losing focus; a new row replaces
+        it. Topmost, like the app."""
         self._close_card()
         secs = build_sections(it["name"], it["base"], it.get("req"),
                               it.get("implicits"), it.get("explicits"),
@@ -1112,10 +1151,18 @@ class UniquesPanel(tk.Frame):
 
         card.update_idletasks()                           # measure before placing
         cw, ch = card.winfo_reqwidth(), card.winfo_reqheight()
-        sw, sh = card.winfo_screenwidth(), card.winfo_screenheight()
-        x = min(ev.x_root + 16, sw - cw - 8)
-        y = min(ev.y_root + 10, sh - ch - 8)
-        card.geometry(f"+{max(8, x)}+{max(8, y)}")
+        # Keep it on the monitor under the cursor (= the one cx is on: the click
+        # was inside cx). Tk's winfo_screenwidth/height describe the PRIMARY
+        # display only, so clamping against them dragged a card opened on the
+        # second monitor back onto the first, at an x that moved with the card's
+        # width. The old metrics stay as the fallback when the Win32 query fails.
+        area = work_area_at(ev.x_root, ev.y_root)
+        if area is None:
+            area = (0, 0, card.winfo_screenwidth(), card.winfo_screenheight())
+        left, top, right, bottom = area
+        x = max(left + 8, min(ev.x_root + 16, right - cw - 8))
+        y = max(top + 8, min(ev.y_root + 10, bottom - ch - 8))
+        card.geometry(f"+{x}+{y}")
         card.bind("<Escape>", lambda e: self._dismiss(card))
         card.bind("<Button-1>", lambda e: self._dismiss(card))
         card.bind("<FocusOut>", lambda e: self._dismiss(card))  # click elsewhere closes

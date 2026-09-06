@@ -145,6 +145,63 @@ def release_instance():
 
 
 # ---------------------------------------------------------------------------
+# Monitor work area — what Tk's winfo_screenwidth/height are NOT on Windows
+# ---------------------------------------------------------------------------
+
+MONITOR_DEFAULTTONEAREST = 0x0002   # a point off every display still snaps to one
+
+_user32 = None
+if sys.platform == "win32":
+    try:
+        from ctypes import wintypes
+
+        class _MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD),
+                        ("rcMonitor", wintypes.RECT),   # the whole display
+                        ("rcWork", wintypes.RECT),      # minus taskbar / appbars
+                        ("dwFlags", wintypes.DWORD)]
+
+        _user32 = ctypes.WinDLL("user32")
+        # Pin the signatures: POINT goes BY VALUE and HMONITOR is pointer-sized —
+        # the default c_int marshalling would truncate it on 64-bit Windows.
+        _user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        _user32.MonitorFromPoint.restype = wintypes.HMONITOR
+        _user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.c_void_p]
+        _user32.GetMonitorInfoW.restype = wintypes.BOOL
+    except Exception:                   # odd interpreter / missing DLL
+        _user32 = None
+
+
+def work_area_at(x, y):
+    """``(left, top, right, bottom)`` of the WORK AREA — the desktop minus the
+    taskbar — of the monitor under the virtual-screen point (x, y): the same
+    coordinates Tk's `x_root`/`y_root` and `wm geometry` use. None off Windows
+    or if the call fails, so a caller falls back to winfo_screenwidth/height
+    without a platform test of its own.
+
+    Port of launcher.winfx.work_area, keyed by a point instead of a window.
+    Tk's winfo_screenwidth/height report the PRIMARY display only, so a popup
+    opened on the second monitor and clamped against them lands back on the
+    first — the point under the cursor names the display that actually matters.
+    """
+    if _user32 is None:
+        return None
+    try:
+        hmon = _user32.MonitorFromPoint(wintypes.POINT(int(x), int(y)),
+                                        MONITOR_DEFAULTTONEAREST)
+        if not hmon:
+            return None
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not _user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            return None
+        r = mi.rcWork
+        return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Resize grip — a frameless window has no native resize border
 # ---------------------------------------------------------------------------
 
